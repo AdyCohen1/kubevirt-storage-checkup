@@ -69,6 +69,15 @@ func newVMUnderTest(name string, pvc *corev1.PersistentVolumeClaim, snap *snapsh
 		optionsToApply = append(optionsToApply, vmi.WithDataVolume(blankDvName, dvOpts...))
 	}
 
+	for i := 1; i <= checkupConfig.NumOfDataVolumes; i++ {
+		dataDvName := fmt.Sprintf("%s-data-%d", dvName, i)
+		dvOpts := []vmi.DataVolumeOption{vmi.WithDataVolumeBlankSource()}
+		if checkupConfig.StorageClass != "" {
+			dvOpts = append(dvOpts, vmi.WithDataVolumeStorageClass(checkupConfig.StorageClass))
+		}
+		optionsToApply = append(optionsToApply, vmi.WithDataVolume(dataDvName, dvOpts...))
+	}
+
 	return vmi.NewVM(name, optionsToApply...)
 }
 

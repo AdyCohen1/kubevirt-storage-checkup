@@ -5,7 +5,10 @@ metadata:
   name: storage-checkup-config
   namespace: $CHECKUP_NAMESPACE
 data:
-  spec.timeout: 10m
+  # Overall job limit; 20m gives snapshot-clone + multi-check runs room on slow CI clusters (default 10m).
+  # Per-VM wait (boot, migration, hotplug); 10m avoids guest-agent timeout on first boot (default 3m).
+  spec.timeout: 20m
+  spec.param.vmiTimeout: 10m
 ---
 apiVersion: batch/v1
 kind: Job

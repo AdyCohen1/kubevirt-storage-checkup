@@ -302,3 +302,4 @@ func getJobConditions() []batchv1.JobCondition {
 
 	return checkupJob.Status.Conditions
 }
+

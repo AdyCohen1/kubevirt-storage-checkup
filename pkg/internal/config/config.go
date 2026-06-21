@@ -33,10 +33,11 @@ import (
 )
 
 const (
-	StorageClassParamName = "storageClass"
-	VMITimeoutParamName   = "vmiTimeout"
-	NumOfVMsParamName     = "numOfVMs"
-	SkipTeardownParamName = "skipTeardown"
+	StorageClassParamName     = "storageClass"
+	VMITimeoutParamName       = "vmiTimeout"
+	NumOfVMsParamName         = "numOfVMs"
+	SkipTeardownParamName     = "skipTeardown"
+	NumOfDataVolumesParamName = "numOfDataVolumes"
 )
 
 // SkipTeardownMode defines the possible modes for skipping teardown.
@@ -49,31 +50,35 @@ const (
 )
 
 const (
-	VMITimeoutDefault = 3 * time.Minute
-	NumOfVMsDefault   = 10
+	VMITimeoutDefault       = 3 * time.Minute
+	NumOfVMsDefault         = 10
+	NumOfDataVolumesDefault = 0
 )
 
 var (
 	ErrInvalidVMITimeout       = errors.New("invalid VMI timeout")
 	ErrInvalidNumOfVMs         = errors.New("invalid number of VMIs")
 	ErrInvalidSkipTeardownMode = errors.New("invalid skip teardown mode")
+	ErrInvalidNumOfDataVolumes = errors.New("invalid number of data volumes")
 )
 
 type Config struct {
-	PodName      string
-	PodUID       string
-	StorageClass string
-	VMITimeout   time.Duration
-	NumOfVMs     int
-	SkipTeardown SkipTeardownMode
+	PodName          string
+	PodUID           string
+	StorageClass     string
+	VMITimeout       time.Duration
+	NumOfVMs         int
+	SkipTeardown     SkipTeardownMode
+	NumOfDataVolumes int
 }
 
 func New(baseConfig kconfig.Config) (Config, error) {
 	newConfig := Config{
-		PodName:    baseConfig.PodName,
-		PodUID:     baseConfig.PodUID,
-		VMITimeout: VMITimeoutDefault,
-		NumOfVMs:   NumOfVMsDefault,
+		PodName:          baseConfig.PodName,
+		PodUID:           baseConfig.PodUID,
+		VMITimeout:       VMITimeoutDefault,
+		NumOfVMs:         NumOfVMsDefault,
+		NumOfDataVolumes: NumOfDataVolumesDefault,
 	}
 
 	return setOptionalParams(baseConfig, newConfig)
@@ -99,6 +104,13 @@ func setOptionalParams(baseConfig kconfig.Config, newConfig Config) (Config, err
 			return Config{}, ErrInvalidNumOfVMs
 		}
 		newConfig.NumOfVMs = numOfVMs
+	}
+	if rawVal, exists := baseConfig.Params[NumOfDataVolumesParamName]; exists && rawVal != "" {
+		numOfDataVolumes, err := strconv.Atoi(rawVal)
+		if err != nil || numOfDataVolumes < 0 || numOfDataVolumes > 10 {
+			return Config{}, ErrInvalidNumOfDataVolumes
+		}
+		newConfig.NumOfDataVolumes = numOfDataVolumes
 	}
 
 	if rawVal, exists := baseConfig.Params[SkipTeardownParamName]; exists && rawVal != "" {
