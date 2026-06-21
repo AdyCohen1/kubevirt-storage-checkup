@@ -34,6 +34,8 @@ import (
 	kvcorev1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
+
+	snapshotv1alpha1 "kubevirt.io/api/snapshot/v1alpha1"
 )
 
 type Client struct {
@@ -158,4 +160,37 @@ func (c *Client) GetDataSource(ctx context.Context, namespace, name string) (*cd
 
 func (c *Client) GetClusterVersion(ctx context.Context, name string) (*configv1.ClusterVersion, error) {
 	return c.ClusterVersions().Get(ctx, name, metav1.GetOptions{})
+}
+
+func (c *Client) CreateVirtualMachineSnapshot(ctx context.Context, namespace string,
+	snapshot *snapshotv1alpha1.VirtualMachineSnapshot) (*snapshotv1alpha1.VirtualMachineSnapshot, error) {
+	return c.VirtualMachineSnapshot(namespace).Create(ctx, snapshot, metav1.CreateOptions{})
+}
+
+func (c *Client) GetVirtualMachineSnapshot(ctx context.Context, namespace, name string) (
+	*snapshotv1alpha1.VirtualMachineSnapshot, error) {
+	return c.VirtualMachineSnapshot(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+func (c *Client) DeleteVirtualMachineSnapshot(ctx context.Context, namespace, name string) error {
+	return c.VirtualMachineSnapshot(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+}
+
+func (c *Client) GetVirtualMachineSnapshotContent(ctx context.Context, namespace, name string) (
+	*snapshotv1alpha1.VirtualMachineSnapshotContent, error) {
+	return c.VirtualMachineSnapshotContent(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+func (c *Client) CreateVirtualMachineRestore(ctx context.Context, namespace string,
+	restore *snapshotv1alpha1.VirtualMachineRestore) (*snapshotv1alpha1.VirtualMachineRestore, error) {
+	return c.VirtualMachineRestore(namespace).Create(ctx, restore, metav1.CreateOptions{})
+}
+
+func (c *Client) GetVirtualMachineRestore(ctx context.Context, namespace, name string) (
+	*snapshotv1alpha1.VirtualMachineRestore, error) {
+	return c.VirtualMachineRestore(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+func (c *Client) DeleteVirtualMachineRestore(ctx context.Context, namespace, name string) error {
+	return c.VirtualMachineRestore(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 }

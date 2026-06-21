@@ -42,6 +42,8 @@ import (
 	"github.com/kiagnose/kubevirt-storage-checkup/pkg/internal/checkup"
 	"github.com/kiagnose/kubevirt-storage-checkup/pkg/internal/config"
 	"github.com/kiagnose/kubevirt-storage-checkup/pkg/internal/reporter"
+
+	snapshotv1alpha1 "kubevirt.io/api/snapshot/v1alpha1"
 )
 
 const (
@@ -300,6 +302,8 @@ type clientConfig struct {
 type clientStub struct {
 	createdVMs        map[string]*kvcorev1.VirtualMachine
 	createdVMIs       map[string]*kvcorev1.VirtualMachineInstance
+	createdSnapshots  map[string]*snapshotv1alpha1.VirtualMachineSnapshot
+	createdRestores   map[string]*snapshotv1alpha1.VirtualMachineRestore
 	vmCreationFailure error
 	vmDeletionFailure error
 	vmiGetFailure     error
@@ -308,9 +312,11 @@ type clientStub struct {
 
 func newClientStub(clientConfig clientConfig) *clientStub {
 	return &clientStub{
-		createdVMs:   map[string]*kvcorev1.VirtualMachine{},
-		createdVMIs:  map[string]*kvcorev1.VirtualMachineInstance{},
-		clientConfig: clientConfig,
+		createdVMs:       map[string]*kvcorev1.VirtualMachine{},
+		createdVMIs:      map[string]*kvcorev1.VirtualMachineInstance{},
+		createdSnapshots: map[string]*snapshotv1alpha1.VirtualMachineSnapshot{},
+		createdRestores:  map[string]*snapshotv1alpha1.VirtualMachineRestore{},
+		clientConfig:     clientConfig,
 	}
 }
 
@@ -770,6 +776,51 @@ func (cs *clientStub) GetClusterVersion(ctx context.Context, name string) (*conf
 	}
 
 	return ver, nil
+}
+
+func (cs *clientStub) CreateVirtualMachineSnapshot(ctx context.Context, namespace string, snapshot *snapshotv1alpha1.VirtualMachineSnapshot) (*snapshotv1alpha1.VirtualMachineSnapshot, error) {
+	snapshot.Namespace = namespace
+	snapshotFullName := objectFullName(snapshot.Namespace, snapshot.Name)
+	cs.createdSnapshots[snapshotFullName] = snapshot
+	vmFullName := objectFullName(namespace, snapshot.Spec.Source.Name)
+	vm, exists := cs.createdVMs[vmFullName]
+	if !exists {
+		return nil, fmt.Errorf("virtual machine %s not found", vmFullName)
+	}
+	var includedVolumes []string
+	for _, volume := range vm.Spec.Template.Spec.Volumes {
+		includedVolumes = append(includedVolumes, volume.Name)
+	}
+
+	readyToUse := true
+	snapshot.Status = &snapshotv1alpha1.VirtualMachineSnapshotStatus{
+		Phase:      snapshotv1alpha1.Succeeded,
+		ReadyToUse: &readyToUse,
+		Indications: []snapshotv1alpha1.Indication{
+			snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication,
+			snapshotv1alpha1.VMSnapshotGuestAgentIndication,
+		},
+		SnapshotVolumes: &snapshotv1alpha1.SnapshotVolumesLists{
+			IncludedVolumes: includedVolumes,
+			ExcludedVolumes: []string{},
+		},
+	}
+	return snapshot, nil
+}
+
+func (cs *clientStub) GetVirtualMachineSnapshot(ctx context.Context, namespace, name string) (*snapshotv1alpha1.VirtualMachineSnapshot, error) {
+	snapshotFullName := objectFullName(namespace, name)
+	snapshot, exists := cs.createdSnapshots[snapshotFullName]
+	if !exists {
+		return nil, errors.NewNotFound(schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachinesnapshots"}, name)
+	}
+	return snapshot, nil
+}
+
+func (cs *clientStub) DeleteVirtualMachineSnapshot(ctx context.Context, namespace, name string) error {
+	snapshotFullName := objectFullName(namespace, name)
+	delete(cs.createdSnapshots, snapshotFullName)
+	return nil
 }
 
 func (cs *clientStub) ListCDIs(ctx context.Context) (*cdiv1.CDIList, error) {
