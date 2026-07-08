@@ -46,6 +46,8 @@ const (
 	VMLiveMigrationKey                           = "vmLiveMigration"
 	VMHotplugVolumeKey                           = "vmHotplugVolume"
 	ConcurrentVMBootKey                          = "concurrentVMBoot"
+	VMSnapshotKey                                = "vmSnapshot"
+	VMRestoreKey                                 = "vmRestore"
 )
 
 type Reporter struct {

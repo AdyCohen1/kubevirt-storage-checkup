@@ -46,6 +46,8 @@ import (
 
 	kvcorev1 "kubevirt.io/api/core/v1"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
+
+	snapshotv1alpha1 "kubevirt.io/api/snapshot/v1alpha1"
 )
 
 type kubeVirtStorageClient interface {
@@ -75,6 +77,14 @@ type kubeVirtStorageClient interface {
 	GetCSIDriver(ctx context.Context, name string) (*storagev1.CSIDriver, error)
 	GetDataSource(ctx context.Context, namespace, name string) (*cdiv1.DataSource, error)
 	GetClusterVersion(ctx context.Context, name string) (*configv1.ClusterVersion, error)
+	CreateVirtualMachineSnapshot(ctx context.Context, namespace string,
+		snapshot *snapshotv1alpha1.VirtualMachineSnapshot) (*snapshotv1alpha1.VirtualMachineSnapshot, error)
+	GetVirtualMachineSnapshot(ctx context.Context, namespace, name string) (*snapshotv1alpha1.VirtualMachineSnapshot, error)
+	DeleteVirtualMachineSnapshot(ctx context.Context, namespace, name string) error
+	GetVirtualMachineSnapshotContent(ctx context.Context, namespace, name string) (*snapshotv1alpha1.VirtualMachineSnapshotContent, error)
+	CreateVirtualMachineRestore(ctx context.Context, namespace string, restore *snapshotv1alpha1.VirtualMachineRestore) (*snapshotv1alpha1.VirtualMachineRestore, error)
+	GetVirtualMachineRestore(ctx context.Context, namespace, name string) (*snapshotv1alpha1.VirtualMachineRestore, error)
+	DeleteVirtualMachineRestore(ctx context.Context, namespace, name string) error
 }
 
 const (
@@ -126,6 +136,7 @@ type Checkup struct {
 	goldenImageSnap     *snapshotv1.VolumeSnapshot
 	vmUnderTest         *kvcorev1.VirtualMachine
 	results             status.Results
+	snapshotName        string
 }
 
 type goldenImagesCheckState struct {
@@ -1140,6 +1151,127 @@ func (c *Checkup) waitForVMIStatus(ctx context.Context, vmName, checkMsg string,
 	log.Print(res)
 	appendSep(result, res)
 
+	return nil
+}
+
+func (c *Checkup) checkVMSnapshot(ctx context.Context, errStr *string) error {
+	log.Print("checkVMSnapshot")
+	apiGroup := "kubevirt.io"
+	// if no VM created: skip that test
+	if c.vmUnderTest == nil {
+		log.Print(MessageSkipNoVMI)
+		c.results.VMSnapshot = MessageSkipNoVMI
+		return nil
+	}
+	vmName := c.vmUnderTest.Name
+	snapshotName := fmt.Sprintf("snapshot-%s", vmName)
+	vmSnapshot := &snapshotv1alpha1.VirtualMachineSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: snapshotName,
+		},
+		Spec: snapshotv1alpha1.VirtualMachineSnapshotSpec{
+			Source: corev1.TypedLocalObjectReference{
+				APIGroup: &apiGroup,
+				Kind:     "VirtualMachine",
+				Name:     vmName,
+			},
+		},
+	}
+
+	// create snapshot, if failed: return error
+	if _, err := c.client.CreateVirtualMachineSnapshot(ctx, c.namespace, vmSnapshot); err != nil {
+		return fmt.Errorf("failed to create VMSnapshot: %w", err)
+	}
+	log.Printf("Waiting for VMSnapshot %q ready", snapshotName)
+	if err := wait.PollImmediateWithContext(ctx, pollInterval, c.checkupConfig.VMITimeout, func(ctx context.Context) (bool, error) {
+		snapshot, err := c.client.GetVirtualMachineSnapshot(ctx, c.namespace, snapshotName)
+		if err != nil {
+			return false, ignoreNotFound(err)
+		}
+		if snapshot.Status != nil && snapshot.Status.ReadyToUse != nil && *snapshot.Status.ReadyToUse {
+			return true, nil
+		}
+		if snapshot.Status != nil && snapshot.Status.Phase == snapshotv1alpha1.Failed {
+			return false, errors.New("snapshot failed")
+		}
+		return false, nil
+	}); err != nil {
+		res := fmt.Sprintf("failed waiting for VMSnapshot %q: %v", snapshotName, err)
+		log.Print(res)
+		c.results.VMSnapshot = res
+		appendSep(errStr, res)
+		return nil
+	}
+
+	// validate the snapshot
+	snapshot, err := c.client.GetVirtualMachineSnapshot(ctx, c.namespace, snapshotName)
+	if err != nil {
+		return fmt.Errorf("failed to get VMSnapshot %q: %w", snapshotName, err)
+	}
+	if snapshot.Status.Phase != snapshotv1alpha1.Succeeded {
+		res := fmt.Sprintf("VMSnapshot %q phase is %s, expected Succeeded", snapshotName, snapshot.Status.Phase)
+		log.Print(res)
+		appendSep(&c.results.VMSnapshot, res)
+		appendSep(errStr, res)
+		return nil
+	}
+
+	// validate the indications
+	expectedIndications := map[snapshotv1alpha1.Indication]bool{
+		snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication: false,
+		snapshotv1alpha1.VMSnapshotGuestAgentIndication:     false,
+	}
+	for _, ind := range snapshot.Status.Indications {
+		if _, expected := expectedIndications[ind]; !expected {
+			res := fmt.Sprintf("VMSnapshot %q has unexpected indication: %s", snapshotName, ind)
+			log.Print(res)
+			appendSep(&c.results.VMSnapshot, res)
+			appendSep(errStr, res)
+			return nil
+		}
+		expectedIndications[ind] = true
+	}
+	for ind, found := range expectedIndications {
+		if !found {
+			res := fmt.Sprintf("VMSnapshot %q missing expected indication: %s", snapshotName, ind)
+			log.Print(res)
+			appendSep(&c.results.VMSnapshot, res)
+			appendSep(errStr, res)
+			return nil
+		}
+	}
+
+	// validate the snapshot volumes
+	if snapshot.Status.SnapshotVolumes == nil {
+		res := fmt.Sprintf("VMSnapshot %q has no SnapshotVolumes", snapshotName)
+		log.Print(res)
+		appendSep(&c.results.VMSnapshot, res)
+		appendSep(errStr, res)
+		return nil
+	}
+
+	expectedVolumeCount := len(c.vmUnderTest.Spec.Template.Spec.Volumes)
+	actualVolumeCount := len(snapshot.Status.SnapshotVolumes.IncludedVolumes)
+	if actualVolumeCount != expectedVolumeCount {
+		res := fmt.Sprintf("VMSnapshot %q included %d volumes, expected %d", snapshotName, actualVolumeCount, expectedVolumeCount)
+		log.Print(res)
+		appendSep(&c.results.VMSnapshot, res)
+		appendSep(errStr, res)
+		return nil
+	}
+
+	if len(snapshot.Status.SnapshotVolumes.ExcludedVolumes) > 0 {
+		res := fmt.Sprintf("VMSnapshot %q has excluded volumes: %v", snapshotName, snapshot.Status.SnapshotVolumes.ExcludedVolumes)
+		log.Print(res)
+		appendSep(&c.results.VMSnapshot, res)
+		appendSep(errStr, res)
+		return nil
+	}
+	c.snapshotName = snapshotName
+
+	res := fmt.Sprintf("VMSnapshot for VM %q succeeded", vmName)
+	log.Print(res)
+	c.results.VMSnapshot = res
 	return nil
 }
 
