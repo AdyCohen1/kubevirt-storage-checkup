@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
 	configv1 "github.com/openshift/api/config/v1"
@@ -796,8 +797,8 @@ func (cs *clientStub) CreateVirtualMachineSnapshot(ctx context.Context, namespac
 	readyToUse := true
 	snapshot.Status = &snapshotv1alpha1.VirtualMachineSnapshotStatus{
 		VirtualMachineSnapshotContentName: &contentName,
-		Phase:      snapshotv1alpha1.Succeeded,
-		ReadyToUse: &readyToUse,
+		Phase:                             snapshotv1alpha1.Succeeded,
+		ReadyToUse:                        &readyToUse,
 		Indications: []snapshotv1alpha1.Indication{
 			snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication,
 			snapshotv1alpha1.VMSnapshotGuestAgentIndication,
@@ -828,7 +829,7 @@ func (cs *clientStub) DeleteVirtualMachineSnapshot(ctx context.Context, namespac
 func (cs *clientStub) GetVirtualMachineSnapshotContent(ctx context.Context, namespace, name string) (*snapshotv1alpha1.VirtualMachineSnapshotContent, error) {
 	var snapshot *snapshotv1alpha1.VirtualMachineSnapshot
 	for _, s := range cs.createdSnapshots {
-		if s.Status.VirtualMachineSnapshotContentName != nil && *s.Status.VirtualMachineSnapshotContentName == name{
+		if s.Status.VirtualMachineSnapshotContentName != nil && *s.Status.VirtualMachineSnapshotContentName == name {
 			snapshot = s
 			break
 		}
@@ -843,10 +844,10 @@ func (cs *clientStub) GetVirtualMachineSnapshotContent(ctx context.Context, name
 	}
 
 	readyToUse := true
-	var volumeBackups []snapshotv1alpha1.VolumeBackup                                                                                        
+	var volumeBackups []snapshotv1alpha1.VolumeBackup
 	var volumeSnapshotStatuses []snapshotv1alpha1.VolumeSnapshotStatus
 	for _, volume := range vm.Spec.Template.Spec.Volumes {
-		vsName := fmt.Sprintf("vs-%s", volume.Name)                                                                                             
+		vsName := fmt.Sprintf("vs-%s", volume.Name)
 		volumeBackups = append(volumeBackups, snapshotv1alpha1.VolumeBackup{
 			VolumeName: volume.Name,
 			PersistentVolumeClaim: snapshotv1alpha1.PersistentVolumeClaim{
@@ -858,7 +859,7 @@ func (cs *clientStub) GetVirtualMachineSnapshotContent(ctx context.Context, name
 		})
 		volumeSnapshotStatuses = append(volumeSnapshotStatuses, snapshotv1alpha1.VolumeSnapshotStatus{
 			VolumeSnapshotName: vsName,
-			ReadyToUse: &readyToUse,
+			ReadyToUse:         &readyToUse,
 		})
 	}
 
@@ -874,53 +875,53 @@ func (cs *clientStub) GetVirtualMachineSnapshotContent(ctx context.Context, name
 			ReadyToUse:           &readyToUse,
 			VolumeSnapshotStatus: volumeSnapshotStatuses,
 		},
-	}, nil		  
+	}, nil
 }
 
 func (cs *clientStub) CreateVirtualMachineRestore(ctx context.Context, namespace string,
-    restore *snapshotv1alpha1.VirtualMachineRestore) (*snapshotv1alpha1.VirtualMachineRestore, error) {
-    restore.Namespace = namespace
-    // 1. snapshot
-    snapshotFullName := objectFullName(namespace, restore.Spec.VirtualMachineSnapshotName)
-    snapshot, exists := cs.createdSnapshots[snapshotFullName]
-    if !exists {
-		return nil, errors.NewNotFound(schema.GroupResource{Group: "snapshot.kubevirt.io", Resource: "virtualmachinesnapshots"},   
-		restore.Spec.VirtualMachineSnapshotName)
+	restore *snapshotv1alpha1.VirtualMachineRestore) (*snapshotv1alpha1.VirtualMachineRestore, error) {
+	restore.Namespace = namespace
+	// 1. snapshot
+	snapshotFullName := objectFullName(namespace, restore.Spec.VirtualMachineSnapshotName)
+	snapshot, exists := cs.createdSnapshots[snapshotFullName]
+	if !exists {
+		return nil, errors.NewNotFound(schema.GroupResource{Group: "snapshot.kubevirt.io", Resource: "virtualmachinesnapshots"},
+			restore.Spec.VirtualMachineSnapshotName)
 	}
-    // 2. VM from snapshot source
-    vmFullName := objectFullName(namespace, snapshot.Spec.Source.Name)
-    vm, exists := cs.createdVMs[vmFullName]
-    if !exists {
-        return nil, fmt.Errorf("virtual machine %s not found", vmFullName)
-    }
-    // 3. build status from VM disks
-    var restores []snapshotv1alpha1.VolumeRestore
-    for _, vol := range vm.Spec.Template.Spec.Volumes {
-		vsName := fmt.Sprintf("vs-%s", vol.Name)                                                                                   
-		restores = append(restores, snapshotv1alpha1.VolumeRestore{                                                                
-				VolumeName:            vol.Name,                                                                                   
-				PersistentVolumeClaimName: vol.Name,                                                                               
-				VolumeSnapshotName:    vsName,                                                                 
-		}) 
+	// 2. VM from snapshot source
+	vmFullName := objectFullName(namespace, snapshot.Spec.Source.Name)
+	vm, exists := cs.createdVMs[vmFullName]
+	if !exists {
+		return nil, fmt.Errorf("virtual machine %s not found", vmFullName)
+	}
+	// 3. build status from VM disks
+	var restores []snapshotv1alpha1.VolumeRestore
+	for _, vol := range vm.Spec.Template.Spec.Volumes {
+		vsName := fmt.Sprintf("vs-%s", vol.Name)
+		restores = append(restores, snapshotv1alpha1.VolumeRestore{
+			VolumeName:                vol.Name,
+			PersistentVolumeClaimName: vol.Name,
+			VolumeSnapshotName:        vsName,
+		})
 	}
 	var deletedDVs []string
 	for _, dvt := range vm.Spec.DataVolumeTemplates {
 		deletedDVs = append(deletedDVs, dvt.Name)
 	}
-	
+
 	complete := true
 	restore.Status = &snapshotv1alpha1.VirtualMachineRestoreStatus{
-		Complete: &complete,
-		RestoreTime: &metav1.Time{Time: time.Now()},
-		Restores: restores,
+		Complete:           &complete,
+		RestoreTime:        &metav1.Time{Time: time.Now()},
+		Restores:           restores,
 		DeletedDataVolumes: deletedDVs,
 		Conditions: []snapshotv1alpha1.Condition{
 			{
-				Type: snapshotv1alpha1.ConditionReady,
+				Type:   snapshotv1alpha1.ConditionReady,
 				Status: corev1.ConditionTrue,
 			},
 			{
-				Type: snapshotv1alpha1.ConditionProgressing,
+				Type:   snapshotv1alpha1.ConditionProgressing,
 				Status: corev1.ConditionFalse,
 			},
 		},
@@ -930,6 +931,19 @@ func (cs *clientStub) CreateVirtualMachineRestore(ctx context.Context, namespace
 }
 
 func (cs *clientStub) GetVirtualMachineRestore(ctx context.Context, namespace, name string) (*snapshotv1alpha1.VirtualMachineRestore, error) {
+	restoreFullName := objectFullName(namespace, name)
+	restore, exists := cs.createdRestores[restoreFullName]
+	if !exists {
+		return nil, errors.NewNotFound(schema.GroupResource{Group: "snapshot.kubevirt.io", Resource: "virtualmachinerestores"}, name)
+	}
+	return restore, nil
+}
+
+func (cs *clientStub) DeleteVirtualMachineRestore(ctx context.Context, namespace, name string) error {
+	restoreFullName := objectFullName(namespace, name)
+	delete(cs.createdRestores, restoreFullName)
+	return nil
+}
 
 func (cs *clientStub) ListCDIs(ctx context.Context) (*cdiv1.CDIList, error) {
 	cdis := &cdiv1.CDIList{
