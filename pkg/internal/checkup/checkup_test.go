@@ -251,6 +251,7 @@ func fullExpectedResults(vmiUnderTestName string, expectedResults map[string]str
 func expectedResultsNoVMI(expectedResults map[string]string) {
 	expectedResults[reporter.VMHotplugVolumeKey] = checkup.MessageSkipNoVMI
 	expectedResults[reporter.VMLiveMigrationKey] = checkup.MessageSkipNoVMI
+	expectedResults[reporter.VMSnapshotKey] = checkup.MessageSkipNoVMI
 	expectedResults[reporter.VMVolumeCloneKey] = ""
 }
 
@@ -276,6 +277,8 @@ func successfulRunResults(vmiUnderTestName string) map[string]string {
 		reporter.VMHotplugVolumeKey: fmt.Sprintf("VMI %q hotplug volume ready\nVMI %q hotplug volume removed",
 			vmiUnderTestName, vmiUnderTestName),
 		reporter.ConcurrentVMBootKey: "Boot completed on all VMs on time",
+		reporter.VMSnapshotKey:       fmt.Sprintf("VMSnapshot for VM %q succeeded", vmiUnderTestName),
+		reporter.VMRestoreKey:        "",
 	}
 }
 

@@ -36,6 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/kiagnose/kubevirt-storage-checkup/pkg/internal/config"
@@ -208,6 +209,10 @@ func (c *Checkup) Run(ctx context.Context) error {
 		return err
 	}
 	if err := c.checkVMIHotplugVolume(ctx, &errStr); err != nil {
+		return err
+	}
+
+	if err := c.checkVMSnapshot(ctx, &errStr); err != nil {
 		return err
 	}
 
@@ -833,6 +838,12 @@ func (c *Checkup) Teardown(ctx context.Context) error {
 		return fmt.Errorf("teardown: %v", err)
 	}
 
+	if c.snapshotName != "" {
+		if err := c.client.DeleteVirtualMachineSnapshot(ctx, c.namespace, c.snapshotName); ignoreNotFound(err) != nil {
+			return fmt.Errorf("teardown: %v", err)
+		}
+	}
+
 	return nil
 }
 
@@ -1154,6 +1165,107 @@ func (c *Checkup) waitForVMIStatus(ctx context.Context, vmName, checkMsg string,
 	return nil
 }
 
+// helper function to report VMSnapshot failure
+func (c *Checkup) reportVMSnapshotFailure(res string, errStr *string) {
+	log.Print(res)
+	appendSep(&c.results.VMSnapshot, res)
+	appendSep(errStr, res)
+}
+
+// helper function to wait for VMSnapshot to be ready
+func (c *Checkup) waitForVMSnapshotReady(ctx context.Context, snapshotName string, errStr *string) bool {
+	waitStart := time.Now()
+	log.Printf("Waiting for VMSnapshot %q ready (started at %s)", snapshotName, waitStart.Format(time.RFC3339))
+	err := wait.PollImmediateWithContext(ctx, pollInterval, c.checkupConfig.VMITimeout, func(ctx context.Context) (bool, error) {
+		snapshot, err := c.client.GetVirtualMachineSnapshot(ctx, c.namespace, snapshotName)
+		if err != nil {
+			return false, ignoreNotFound(err)
+		}
+		if snapshot.Status != nil && snapshot.Status.ReadyToUse != nil && *snapshot.Status.ReadyToUse {
+			return true, nil
+		}
+		if snapshot.Status != nil && snapshot.Status.Phase == snapshotv1alpha1.Failed {
+			return false, errors.New("snapshot failed")
+		}
+		return false, nil
+	})
+	elapsed := time.Since(waitStart).Round(time.Millisecond)
+	if err != nil {
+		c.reportVMSnapshotFailure(
+			fmt.Sprintf("failed waiting for VMSnapshot %q after %s: %v", snapshotName, elapsed, err),
+			errStr,
+		)
+		return true
+	}
+	log.Printf("VMSnapshot %q ReadyToUse after %s", snapshotName, elapsed)
+	return false
+}
+
+// validateVMSnapshot checks phase, indications, and volumes.
+// Returns true if validation failed (already reported).
+func (c *Checkup) validateVMSnapshot(snapshot *snapshotv1alpha1.VirtualMachineSnapshot, snapshotName string, errStr *string) bool {
+	if snapshot.Status == nil || snapshot.Status.Phase != snapshotv1alpha1.Succeeded {
+		phase := "has no status"
+		if snapshot.Status != nil {
+			phase = string(snapshot.Status.Phase)
+		}
+		c.reportVMSnapshotFailure(fmt.Sprintf("VMSnapshot %q phase is %s, expected Succeeded", snapshotName, phase), errStr)
+		return true
+	}
+
+	expected := sets.New(
+		snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication,
+		snapshotv1alpha1.VMSnapshotGuestAgentIndication,
+	)
+	actual := sets.New[snapshotv1alpha1.Indication](snapshot.Status.Indications...)
+	if unexpected := actual.Difference(expected); unexpected.Len() > 0 {
+		c.reportVMSnapshotFailure(
+			fmt.Sprintf("VMSnapshot %q has unexpected indication(s): %v", snapshotName, sets.List(unexpected)),
+			errStr,
+		)
+		return true
+	}
+	if missing := expected.Difference(actual); missing.Len() > 0 {
+		c.reportVMSnapshotFailure(
+			fmt.Sprintf("VMSnapshot %q missing expected indication(s): %v", snapshotName, sets.List(missing)),
+			errStr,
+		)
+		return true
+	}
+
+	if snapshot.Status.SnapshotVolumes == nil {
+		c.reportVMSnapshotFailure(fmt.Sprintf("VMSnapshot %q has no SnapshotVolumes", snapshotName), errStr)
+		return true
+	}
+
+	// Require every volume from the VM template to be included. Extra included
+	// volumes (e.g. persistent TPM state) are OK and common on real clusters.
+	expectedVolumes := sets.New[string]()
+	for _, vol := range c.vmUnderTest.Spec.Template.Spec.Volumes {
+		expectedVolumes.Insert(vol.Name)
+	}
+	includedVolumes := sets.New(snapshot.Status.SnapshotVolumes.IncludedVolumes...)
+	excludedVolumes := sets.New(snapshot.Status.SnapshotVolumes.ExcludedVolumes...)
+
+	if missing := expectedVolumes.Difference(includedVolumes); missing.Len() > 0 {
+		c.reportVMSnapshotFailure(
+			fmt.Sprintf("VMSnapshot %q missing expected volume(s): %v (included: %v)",
+				snapshotName, sets.List(missing), sets.List(includedVolumes)),
+			errStr,
+		)
+		return true
+	}
+	if excluded := expectedVolumes.Intersection(excludedVolumes); excluded.Len() > 0 {
+		c.reportVMSnapshotFailure(
+			fmt.Sprintf("VMSnapshot %q excluded expected volume(s): %v", snapshotName, sets.List(excluded)),
+			errStr,
+		)
+		return true
+	}
+
+	return false
+}
+
 func (c *Checkup) checkVMSnapshot(ctx context.Context, errStr *string) error {
 	log.Print("checkVMSnapshot")
 	apiGroup := "kubevirt.io"
@@ -1179,27 +1291,15 @@ func (c *Checkup) checkVMSnapshot(ctx context.Context, errStr *string) error {
 	}
 
 	// create snapshot, if failed: return error
+	createStart := time.Now()
+	log.Printf("Creating VMSnapshot %q at %s", snapshotName, createStart.Format(time.RFC3339))
 	if _, err := c.client.CreateVirtualMachineSnapshot(ctx, c.namespace, vmSnapshot); err != nil {
 		return fmt.Errorf("failed to create VMSnapshot: %w", err)
 	}
-	log.Printf("Waiting for VMSnapshot %q ready", snapshotName)
-	if err := wait.PollImmediateWithContext(ctx, pollInterval, c.checkupConfig.VMITimeout, func(ctx context.Context) (bool, error) {
-		snapshot, err := c.client.GetVirtualMachineSnapshot(ctx, c.namespace, snapshotName)
-		if err != nil {
-			return false, ignoreNotFound(err)
-		}
-		if snapshot.Status != nil && snapshot.Status.ReadyToUse != nil && *snapshot.Status.ReadyToUse {
-			return true, nil
-		}
-		if snapshot.Status != nil && snapshot.Status.Phase == snapshotv1alpha1.Failed {
-			return false, errors.New("snapshot failed")
-		}
-		return false, nil
-	}); err != nil {
-		res := fmt.Sprintf("failed waiting for VMSnapshot %q: %v", snapshotName, err)
-		log.Print(res)
-		c.results.VMSnapshot = res
-		appendSep(errStr, res)
+	log.Printf("VMSnapshot %q created in %s", snapshotName, time.Since(createStart).Round(time.Millisecond))
+
+	// wait for snapshot to be ready, if failed: return error
+	if c.waitForVMSnapshotReady(ctx, snapshotName, errStr) {
 		return nil
 	}
 
@@ -1208,63 +1308,7 @@ func (c *Checkup) checkVMSnapshot(ctx context.Context, errStr *string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get VMSnapshot %q: %w", snapshotName, err)
 	}
-	if snapshot.Status.Phase != snapshotv1alpha1.Succeeded {
-		res := fmt.Sprintf("VMSnapshot %q phase is %s, expected Succeeded", snapshotName, snapshot.Status.Phase)
-		log.Print(res)
-		appendSep(&c.results.VMSnapshot, res)
-		appendSep(errStr, res)
-		return nil
-	}
-
-	// validate the indications
-	expectedIndications := map[snapshotv1alpha1.Indication]bool{
-		snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication: false,
-		snapshotv1alpha1.VMSnapshotGuestAgentIndication:     false,
-	}
-	for _, ind := range snapshot.Status.Indications {
-		if _, expected := expectedIndications[ind]; !expected {
-			res := fmt.Sprintf("VMSnapshot %q has unexpected indication: %s", snapshotName, ind)
-			log.Print(res)
-			appendSep(&c.results.VMSnapshot, res)
-			appendSep(errStr, res)
-			return nil
-		}
-		expectedIndications[ind] = true
-	}
-	for ind, found := range expectedIndications {
-		if !found {
-			res := fmt.Sprintf("VMSnapshot %q missing expected indication: %s", snapshotName, ind)
-			log.Print(res)
-			appendSep(&c.results.VMSnapshot, res)
-			appendSep(errStr, res)
-			return nil
-		}
-	}
-
-	// validate the snapshot volumes
-	if snapshot.Status.SnapshotVolumes == nil {
-		res := fmt.Sprintf("VMSnapshot %q has no SnapshotVolumes", snapshotName)
-		log.Print(res)
-		appendSep(&c.results.VMSnapshot, res)
-		appendSep(errStr, res)
-		return nil
-	}
-
-	expectedVolumeCount := len(c.vmUnderTest.Spec.Template.Spec.Volumes)
-	actualVolumeCount := len(snapshot.Status.SnapshotVolumes.IncludedVolumes)
-	if actualVolumeCount != expectedVolumeCount {
-		res := fmt.Sprintf("VMSnapshot %q included %d volumes, expected %d", snapshotName, actualVolumeCount, expectedVolumeCount)
-		log.Print(res)
-		appendSep(&c.results.VMSnapshot, res)
-		appendSep(errStr, res)
-		return nil
-	}
-
-	if len(snapshot.Status.SnapshotVolumes.ExcludedVolumes) > 0 {
-		res := fmt.Sprintf("VMSnapshot %q has excluded volumes: %v", snapshotName, snapshot.Status.SnapshotVolumes.ExcludedVolumes)
-		log.Print(res)
-		appendSep(&c.results.VMSnapshot, res)
-		appendSep(errStr, res)
+	if c.validateVMSnapshot(snapshot, snapshotName, errStr) {
 		return nil
 	}
 	c.snapshotName = snapshotName

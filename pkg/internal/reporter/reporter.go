@@ -97,6 +97,8 @@ func FormatResults(checkupResults status.Results) map[string]string {
 		VMLiveMigrationKey:                           checkupResults.VMLiveMigration,
 		VMHotplugVolumeKey:                           checkupResults.VMHotplugVolume,
 		ConcurrentVMBootKey:                          checkupResults.ConcurrentVMBoot,
+		VMSnapshotKey:                                checkupResults.VMSnapshot,
+		VMRestoreKey:                                 checkupResults.VMRestore,
 	}
 
 	return formattedResults
