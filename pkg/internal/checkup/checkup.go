@@ -53,6 +53,8 @@ import (
 
 type kubeVirtStorageClient interface {
 	CreateVirtualMachine(ctx context.Context, namespace string, vm *kvcorev1.VirtualMachine) (*kvcorev1.VirtualMachine, error)
+	GetVirtualMachine(ctx context.Context, namespace, name string) (*kvcorev1.VirtualMachine, error)
+	UpdateVirtualMachine(ctx context.Context, namespace string, vm *kvcorev1.VirtualMachine) (*kvcorev1.VirtualMachine, error)
 	DeleteVirtualMachine(ctx context.Context, namespace, name string) error
 	GetVirtualMachineInstance(ctx context.Context, namespace, name string) (*kvcorev1.VirtualMachineInstance, error)
 	CreateVirtualMachineInstanceMigration(ctx context.Context, namespace string,
@@ -113,6 +115,7 @@ const (
 	MessageSkipNoDefaultStorageClass = "Skip check - no default storage class"
 	MessageSkipNoGoldenImage         = "Skip check - no golden image PVC or Snapshot"
 	MessageSkipNoVMI                 = "Skip check - no VMI"
+	MessageSkipNoSnapshot            = "Skip check - no VM snapshot"
 	MessageSkipSingleNode            = "Skip check - single node"
 
 	pollInterval = 5 * time.Second
@@ -213,6 +216,9 @@ func (c *Checkup) Run(ctx context.Context) error {
 	}
 
 	if err := c.checkVMSnapshot(ctx, &errStr); err != nil {
+		return err
+	}
+	if err := c.checkVMRestore(ctx, &errStr); err != nil {
 		return err
 	}
 
@@ -826,6 +832,17 @@ func (c *Checkup) Teardown(ctx context.Context) error {
 		return nil
 	}
 
+	restoreName := fmt.Sprintf("restore-%s", c.vmUnderTest.Name)
+	if err := c.client.DeleteVirtualMachineRestore(ctx, c.namespace, restoreName); ignoreNotFound(err) != nil {
+		return fmt.Errorf("teardown: %v", err)
+	}
+
+	if c.snapshotName != "" {
+		if err := c.client.DeleteVirtualMachineSnapshot(ctx, c.namespace, c.snapshotName); ignoreNotFound(err) != nil {
+			return fmt.Errorf("teardown: %v", err)
+		}
+	}
+
 	if err := c.client.DeleteVirtualMachine(ctx, c.namespace, c.vmUnderTest.Name); ignoreNotFound(err) != nil {
 		return fmt.Errorf("teardown: %v", err)
 	}
@@ -836,12 +853,6 @@ func (c *Checkup) Teardown(ctx context.Context) error {
 
 	if err := c.client.DeletePersistentVolumeClaim(ctx, c.namespace, hotplugVolumeName); ignoreNotFound(err) != nil {
 		return fmt.Errorf("teardown: %v", err)
-	}
-
-	if c.snapshotName != "" {
-		if err := c.client.DeleteVirtualMachineSnapshot(ctx, c.namespace, c.snapshotName); ignoreNotFound(err) != nil {
-			return fmt.Errorf("teardown: %v", err)
-		}
 	}
 
 	return nil
@@ -1317,6 +1328,172 @@ func (c *Checkup) checkVMSnapshot(ctx context.Context, errStr *string) error {
 	log.Print(res)
 	c.results.VMSnapshot = res
 	return nil
+}
+
+// stopVMUnderTest sets RunStrategy to Halted and waits until the VMI is gone.
+// Required before VirtualMachineRestore (v1alpha1 has no StopTarget policy).
+func (c *Checkup) stopVMUnderTest(ctx context.Context) error {
+	if c.vmUnderTest == nil {
+		return nil
+	}
+	vmName := c.vmUnderTest.Name
+	log.Printf("Stopping VM %q before restore", vmName)
+
+	vm, err := c.client.GetVirtualMachine(ctx, c.namespace, vmName)
+	if err != nil {
+		return fmt.Errorf("failed to get VM %q: %w", vmName, err)
+	}
+
+	runStrategy := kvcorev1.RunStrategyHalted
+	vm.Spec.RunStrategy = &runStrategy
+	// Running and RunStrategy are mutually exclusive.
+	vm.Spec.Running = nil
+
+	if _, err := c.client.UpdateVirtualMachine(ctx, c.namespace, vm); err != nil {
+		return fmt.Errorf("failed to update VM %q to Halted: %w", vmName, err)
+	}
+	c.vmUnderTest = vm
+
+	log.Printf("Waiting for VMI %q to disappear", vmName)
+	if err := wait.PollImmediateWithContext(ctx, pollInterval, c.checkupConfig.VMITimeout, func(ctx context.Context) (bool, error) {
+		_, err := c.client.GetVirtualMachineInstance(ctx, c.namespace, vmName)
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				return true, nil
+			}
+			return false, err
+		}
+		return false, nil
+	}); err != nil {
+		return fmt.Errorf("failed waiting for VMI %q to stop: %w", vmName, err)
+	}
+
+	log.Printf("VM %q stopped", vmName)
+	return nil
+}
+
+func (c *Checkup) checkVMRestore(ctx context.Context, errStr *string) error {
+	log.Print("checkVMRestore")
+	apiGroup := "kubevirt.io"
+
+	if c.vmUnderTest == nil {
+		log.Print(MessageSkipNoVMI)
+		c.results.VMRestore = MessageSkipNoVMI
+		return nil
+	}
+	if c.snapshotName == "" {
+		log.Print(MessageSkipNoSnapshot)
+		c.results.VMRestore = MessageSkipNoSnapshot
+		return nil
+	}
+
+	if err := c.stopVMUnderTest(ctx); err != nil {
+		return fmt.Errorf("failed to stop VM before restore: %w", err)
+	}
+
+	vmName := c.vmUnderTest.Name
+	restoreName := fmt.Sprintf("restore-%s", vmName)
+	vmRestore := &snapshotv1alpha1.VirtualMachineRestore{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: restoreName,
+		},
+		Spec: snapshotv1alpha1.VirtualMachineRestoreSpec{
+			Target: corev1.TypedLocalObjectReference{
+				APIGroup: &apiGroup,
+				Kind:     "VirtualMachine",
+				Name:     vmName,
+			},
+			VirtualMachineSnapshotName: c.snapshotName,
+		},
+	}
+
+	createStart := time.Now()
+	log.Printf("Creating VMRestore %q at %s", restoreName, createStart.Format(time.RFC3339))
+	if _, err := c.client.CreateVirtualMachineRestore(ctx, c.namespace, vmRestore); err != nil {
+		return fmt.Errorf("failed to create VMRestore: %w", err)
+	}
+	log.Printf("VMRestore %q created in %s", restoreName, time.Since(createStart).Round(time.Millisecond))
+
+	if c.waitForVMRestoreComplete(ctx, restoreName, errStr) {
+		return nil
+	}
+
+	restore, err := c.client.GetVirtualMachineRestore(ctx, c.namespace, restoreName)
+	if err != nil {
+		return fmt.Errorf("failed to get VMRestore %q: %w", restoreName, err)
+	}
+	if c.validateVMRestore(restore, restoreName, errStr) {
+		return nil
+	}
+
+	res := fmt.Sprintf("VMRestore for VM %q succeeded", vmName)
+	log.Print(res)
+	c.results.VMRestore = res
+	return nil
+}
+
+func (c *Checkup) reportVMRestoreFailure(res string, errStr *string) {
+	log.Print(res)
+	appendSep(&c.results.VMRestore, res)
+	appendSep(errStr, res)
+}
+
+func (c *Checkup) waitForVMRestoreComplete(ctx context.Context, restoreName string, errStr *string) bool {
+	waitStart := time.Now()
+	log.Printf("Waiting for VMRestore %q complete (started at %s)", restoreName, waitStart.Format(time.RFC3339))
+	err := wait.PollImmediateWithContext(ctx, pollInterval, c.checkupConfig.VMITimeout, func(ctx context.Context) (bool, error) {
+		restore, err := c.client.GetVirtualMachineRestore(ctx, c.namespace, restoreName)
+		if err != nil {
+			return false, ignoreNotFound(err)
+		}
+		if restore.Status != nil && restore.Status.Complete != nil && *restore.Status.Complete {
+			return true, nil
+		}
+		return false, nil
+	})
+	elapsed := time.Since(waitStart).Round(time.Millisecond)
+	if err != nil {
+		c.reportVMRestoreFailure(
+			fmt.Sprintf("failed waiting for VMRestore %q after %s: %v", restoreName, elapsed, err),
+			errStr,
+		)
+		return true
+	}
+	log.Printf("VMRestore %q complete after %s", restoreName, elapsed)
+	return false
+}
+
+func (c *Checkup) validateVMRestore(restore *snapshotv1alpha1.VirtualMachineRestore, restoreName string, errStr *string) bool {
+	if restore.Status == nil {
+		c.reportVMRestoreFailure(fmt.Sprintf("VMRestore %q has no status", restoreName), errStr)
+		return true
+	}
+	if restore.Status.Complete == nil || !*restore.Status.Complete {
+		c.reportVMRestoreFailure(fmt.Sprintf("VMRestore %q is not complete", restoreName), errStr)
+		return true
+	}
+	if len(restore.Status.Restores) == 0 {
+		c.reportVMRestoreFailure(fmt.Sprintf("VMRestore %q has no volume restores", restoreName), errStr)
+		return true
+	}
+	// Same idea as snapshot: every template volume should appear in Restores.
+	expectedVolumes := sets.New[string]()
+	for _, vol := range c.vmUnderTest.Spec.Template.Spec.Volumes {
+		expectedVolumes.Insert(vol.Name)
+	}
+	restoredVolumes := sets.New[string]()
+	for _, vr := range restore.Status.Restores {
+		restoredVolumes.Insert(vr.VolumeName)
+	}
+	if missing := expectedVolumes.Difference(restoredVolumes); missing.Len() > 0 {
+		c.reportVMRestoreFailure(
+			fmt.Sprintf("VMRestore %q missing expected volume(s): %v (restored: %v)",
+				restoreName, sets.List(missing), sets.List(restoredVolumes)),
+			errStr,
+		)
+		return true
+	}
+	return false
 }
 
 func appendSep(s *string, appended string) {

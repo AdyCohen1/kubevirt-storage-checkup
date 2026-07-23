@@ -252,6 +252,7 @@ func expectedResultsNoVMI(expectedResults map[string]string) {
 	expectedResults[reporter.VMHotplugVolumeKey] = checkup.MessageSkipNoVMI
 	expectedResults[reporter.VMLiveMigrationKey] = checkup.MessageSkipNoVMI
 	expectedResults[reporter.VMSnapshotKey] = checkup.MessageSkipNoVMI
+	expectedResults[reporter.VMRestoreKey] = checkup.MessageSkipNoVMI
 	expectedResults[reporter.VMVolumeCloneKey] = ""
 }
 
@@ -278,7 +279,7 @@ func successfulRunResults(vmiUnderTestName string) map[string]string {
 			vmiUnderTestName, vmiUnderTestName),
 		reporter.ConcurrentVMBootKey: "Boot completed on all VMs on time",
 		reporter.VMSnapshotKey:       fmt.Sprintf("VMSnapshot for VM %q succeeded", vmiUnderTestName),
-		reporter.VMRestoreKey:        "",
+		reporter.VMRestoreKey:        fmt.Sprintf("VMRestore for VM %q succeeded", vmiUnderTestName),
 	}
 }
 
@@ -362,6 +363,32 @@ func (cs *clientStub) CreateVirtualMachine(ctx context.Context, namespace string
 	return vm, nil
 }
 
+func (cs *clientStub) GetVirtualMachine(ctx context.Context, namespace, name string) (*kvcorev1.VirtualMachine, error) {
+	vmFullName := objectFullName(namespace, name)
+	vm, exist := cs.createdVMs[vmFullName]
+	if !exist {
+		return nil, errors.NewNotFound(schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachines"}, name)
+	}
+	return vm, nil
+}
+
+func (cs *clientStub) UpdateVirtualMachine(ctx context.Context, namespace string, vm *kvcorev1.VirtualMachine) (
+	*kvcorev1.VirtualMachine, error) {
+	vm.Namespace = namespace
+	vmFullName := objectFullName(namespace, vm.Name)
+	if _, exist := cs.createdVMs[vmFullName]; !exist {
+		return nil, errors.NewNotFound(schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachines"}, vm.Name)
+	}
+	cs.createdVMs[vmFullName] = vm
+
+	// Mimic Halted: virt-controller removes the VMI when the VM is stopped.
+	if vm.Spec.RunStrategy != nil && *vm.Spec.RunStrategy == kvcorev1.RunStrategyHalted {
+		delete(cs.createdVMIs, vmFullName)
+	}
+
+	return vm, nil
+}
+
 func (cs *clientStub) DeleteVirtualMachine(ctx context.Context, namespace, name string) error {
 	if cs.vmDeletionFailure != nil {
 		return cs.vmDeletionFailure
@@ -370,9 +397,6 @@ func (cs *clientStub) DeleteVirtualMachine(ctx context.Context, namespace, name 
 	vmFullName := objectFullName(namespace, name)
 	if _, exist := cs.createdVMs[vmFullName]; !exist {
 		return errors.NewNotFound(schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachines"}, name)
-	}
-	if _, exist := cs.createdVMIs[vmFullName]; !exist {
-		return errors.NewNotFound(schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachineinstances"}, name)
 	}
 
 	if !cs.skipDeletion {

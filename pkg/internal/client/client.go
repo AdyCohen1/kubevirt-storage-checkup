@@ -67,6 +67,15 @@ func (c *Client) CreateVirtualMachine(ctx context.Context, namespace string, vm 
 	return c.VirtualMachine(namespace).Create(ctx, vm)
 }
 
+func (c *Client) GetVirtualMachine(ctx context.Context, namespace, name string) (*kvcorev1.VirtualMachine, error) {
+	return c.VirtualMachine(namespace).Get(ctx, name, &metav1.GetOptions{})
+}
+
+func (c *Client) UpdateVirtualMachine(ctx context.Context, namespace string, vm *kvcorev1.VirtualMachine) (
+	*kvcorev1.VirtualMachine, error) {
+	return c.VirtualMachine(namespace).Update(ctx, vm)
+}
+
 func (c *Client) DeleteVirtualMachine(ctx context.Context, namespace, name string) error {
 	return c.VirtualMachine(namespace).Delete(ctx, name, &metav1.DeleteOptions{})
 }
