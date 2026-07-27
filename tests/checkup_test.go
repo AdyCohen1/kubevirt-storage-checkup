@@ -208,6 +208,16 @@ func newCheckupRole() *rbacv1.Role {
 				Resources: []string{"persistentvolumeclaims"},
 				Verbs:     []string{"delete"},
 			},
+			{
+				APIGroups: []string{"snapshot.kubevirt.io"},
+				Resources: []string{"virtualmachinesnapshots", "virtualmachinerestores"},
+				Verbs:     []string{"create", "get", "delete"},
+			},
+			{
+				APIGroups: []string{"snapshot.kubevirt.io"},
+				Resources: []string{"virtualmachinesnapshotcontents"},
+				Verbs:     []string{"get"},
+			},
 		},
 	}
 }
@@ -302,4 +312,3 @@ func getJobConditions() []batchv1.JobCondition {
 
 	return checkupJob.Status.Conditions
 }
-
