@@ -363,30 +363,18 @@ func (cs *clientStub) CreateVirtualMachine(ctx context.Context, namespace string
 	return vm, nil
 }
 
-func (cs *clientStub) GetVirtualMachine(ctx context.Context, namespace, name string) (*kvcorev1.VirtualMachine, error) {
+func (cs *clientStub) StopVirtualMachine(ctx context.Context, namespace, name string, stopOptions *kvcorev1.StopOptions) error {
 	vmFullName := objectFullName(namespace, name)
 	vm, exist := cs.createdVMs[vmFullName]
 	if !exist {
-		return nil, errors.NewNotFound(schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachines"}, name)
+		return errors.NewNotFound(schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachines"}, name)
 	}
-	return vm, nil
-}
-
-func (cs *clientStub) UpdateVirtualMachine(ctx context.Context, namespace string, vm *kvcorev1.VirtualMachine) (
-	*kvcorev1.VirtualMachine, error) {
-	vm.Namespace = namespace
-	vmFullName := objectFullName(namespace, vm.Name)
-	if _, exist := cs.createdVMs[vmFullName]; !exist {
-		return nil, errors.NewNotFound(schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachines"}, vm.Name)
-	}
-	cs.createdVMs[vmFullName] = vm
-
-	// Mimic Halted: virt-controller removes the VMI when the VM is stopped.
-	if vm.Spec.RunStrategy != nil && *vm.Spec.RunStrategy == kvcorev1.RunStrategyHalted {
-		delete(cs.createdVMIs, vmFullName)
-	}
-
-	return vm, nil
+	// Mimic Stop on Always: KubeVirt moves to Halted and removes the VMI.
+	runStrategy := kvcorev1.RunStrategyHalted
+	vm.Spec.RunStrategy = &runStrategy
+	vm.Spec.Running = nil
+	delete(cs.createdVMIs, vmFullName)
+	return nil
 }
 
 func (cs *clientStub) DeleteVirtualMachine(ctx context.Context, namespace, name string) error {

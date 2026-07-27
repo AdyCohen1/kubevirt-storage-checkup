@@ -53,9 +53,8 @@ import (
 
 type kubeVirtStorageClient interface {
 	CreateVirtualMachine(ctx context.Context, namespace string, vm *kvcorev1.VirtualMachine) (*kvcorev1.VirtualMachine, error)
-	GetVirtualMachine(ctx context.Context, namespace, name string) (*kvcorev1.VirtualMachine, error)
-	UpdateVirtualMachine(ctx context.Context, namespace string, vm *kvcorev1.VirtualMachine) (*kvcorev1.VirtualMachine, error)
 	DeleteVirtualMachine(ctx context.Context, namespace, name string) error
+	StopVirtualMachine(ctx context.Context, namespace, name string, stopOptions *kvcorev1.StopOptions) error
 	GetVirtualMachineInstance(ctx context.Context, namespace, name string) (*kvcorev1.VirtualMachineInstance, error)
 	CreateVirtualMachineInstanceMigration(ctx context.Context, namespace string,
 		vmim *kvcorev1.VirtualMachineInstanceMigration) (*kvcorev1.VirtualMachineInstanceMigration, error)
@@ -1340,7 +1339,7 @@ func (c *Checkup) checkVMSnapshot(ctx context.Context, errStr *string) error {
 	return nil
 }
 
-// stopVMUnderTest sets RunStrategy to Halted and waits until the VMI is gone.
+// stopVMUnderTest stops the VM via the KubeVirt Stop subresource and waits until the VMI is gone.
 // Required before VirtualMachineRestore (v1alpha1 has no StopTarget policy).
 func (c *Checkup) stopVMUnderTest(ctx context.Context) error {
 	if c.vmUnderTest == nil {
@@ -1349,20 +1348,9 @@ func (c *Checkup) stopVMUnderTest(ctx context.Context) error {
 	vmName := c.vmUnderTest.Name
 	log.Printf("Stopping VM %q before restore", vmName)
 
-	vm, err := c.client.GetVirtualMachine(ctx, c.namespace, vmName)
-	if err != nil {
-		return fmt.Errorf("failed to get VM %q: %w", vmName, err)
+	if err := c.client.StopVirtualMachine(ctx, c.namespace, vmName, &kvcorev1.StopOptions{}); err != nil {
+		return fmt.Errorf("failed to stop VM %q: %w", vmName, err)
 	}
-
-	runStrategy := kvcorev1.RunStrategyHalted
-	vm.Spec.RunStrategy = &runStrategy
-	// Running and RunStrategy are mutually exclusive.
-	vm.Spec.Running = nil
-
-	if _, err := c.client.UpdateVirtualMachine(ctx, c.namespace, vm); err != nil {
-		return fmt.Errorf("failed to update VM %q to Halted: %w", vmName, err)
-	}
-	c.vmUnderTest = vm
 
 	log.Printf("Waiting for VMI %q to disappear", vmName)
 	if err := wait.PollImmediateWithContext(ctx, pollInterval, c.checkupConfig.VMITimeout, func(ctx context.Context) (bool, error) {
