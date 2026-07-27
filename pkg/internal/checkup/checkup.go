@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1333,7 +1334,10 @@ func (c *Checkup) checkVMSnapshot(ctx context.Context, errStr *string) error {
 		return nil
 	}
 
-	res := fmt.Sprintf("VMSnapshot for VM %q succeeded", vmName)
+	res := fmt.Sprintf("VMSnapshot for VM %q succeeded (CreationTime=%s, ReadyToUse=%s)",
+		vmName,
+		formatMetaTime(snapshot.Status.CreationTime),
+		formatBoolPtr(snapshot.Status.ReadyToUse))
 	log.Print(res)
 	c.results.VMSnapshot = res
 	return nil
@@ -1379,7 +1383,7 @@ func (c *Checkup) checkVMRestore(ctx context.Context, errStr *string) error {
 		c.results.VMRestore = MessageSkipNoVMI
 		return nil
 	}
-	if c.results.VMSnapshot != fmt.Sprintf("VMSnapshot for VM %q succeeded", c.vmUnderTest.Name) {
+	if !strings.HasPrefix(c.results.VMSnapshot, fmt.Sprintf("VMSnapshot for VM %q succeeded", c.vmUnderTest.Name)) {
 		log.Print(MessageSkipNoSnapshot)
 		c.results.VMRestore = MessageSkipNoSnapshot
 		return nil
@@ -1424,7 +1428,10 @@ func (c *Checkup) checkVMRestore(ctx context.Context, errStr *string) error {
 		return nil
 	}
 
-	res := fmt.Sprintf("VMRestore for VM %q succeeded", vmName)
+	res := fmt.Sprintf("VMRestore for VM %q succeeded (RestoreTime=%s, Complete=%s)",
+		vmName,
+		formatMetaTime(restore.Status.RestoreTime),
+		formatBoolPtr(restore.Status.Complete))
 	log.Print(res)
 	c.results.VMRestore = res
 	return nil
@@ -1503,6 +1510,20 @@ func appendSep(s *string, appended string) {
 		return
 	}
 	*s = *s + "\n" + appended
+}
+
+func formatMetaTime(t *metav1.Time) string {
+	if t == nil {
+		return "<nil>"
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+func formatBoolPtr(b *bool) string {
+	if b == nil {
+		return "<nil>"
+	}
+	return strconv.FormatBool(*b)
 }
 
 // FIXME: use slices.contains instead

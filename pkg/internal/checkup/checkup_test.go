@@ -278,8 +278,12 @@ func successfulRunResults(vmiUnderTestName string) map[string]string {
 		reporter.VMHotplugVolumeKey: fmt.Sprintf("VMI %q hotplug volume ready\nVMI %q hotplug volume removed",
 			vmiUnderTestName, vmiUnderTestName),
 		reporter.ConcurrentVMBootKey: "Boot completed on all VMs on time",
-		reporter.VMSnapshotKey:       fmt.Sprintf("VMSnapshot for VM %q succeeded", vmiUnderTestName),
-		reporter.VMRestoreKey:        fmt.Sprintf("VMRestore for VM %q succeeded", vmiUnderTestName),
+		reporter.VMSnapshotKey: fmt.Sprintf(
+			"VMSnapshot for VM %q succeeded (CreationTime=%s, ReadyToUse=true)",
+			vmiUnderTestName, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).UTC().Format(time.RFC3339)),
+		reporter.VMRestoreKey: fmt.Sprintf(
+			"VMRestore for VM %q succeeded (RestoreTime=%s, Complete=true)",
+			vmiUnderTestName, time.Date(2026, 1, 2, 3, 5, 6, 0, time.UTC).UTC().Format(time.RFC3339)),
 	}
 }
 
@@ -809,9 +813,11 @@ func (cs *clientStub) CreateVirtualMachineSnapshot(ctx context.Context, namespac
 	}
 
 	readyToUse := true
+	creationTime := metav1.Time{Time: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)}
 	snapshot.Status = &snapshotv1alpha1.VirtualMachineSnapshotStatus{
-		Phase:      snapshotv1alpha1.Succeeded,
-		ReadyToUse: &readyToUse,
+		Phase:        snapshotv1alpha1.Succeeded,
+		ReadyToUse:   &readyToUse,
+		CreationTime: &creationTime,
 		Indications: []snapshotv1alpha1.Indication{
 			snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication,
 			snapshotv1alpha1.VMSnapshotGuestAgentIndication,
@@ -871,9 +877,10 @@ func (cs *clientStub) CreateVirtualMachineRestore(ctx context.Context, namespace
 	}
 
 	complete := true
+	restoreTime := metav1.Time{Time: time.Date(2026, 1, 2, 3, 5, 6, 0, time.UTC)}
 	restore.Status = &snapshotv1alpha1.VirtualMachineRestoreStatus{
 		Complete:           &complete,
-		RestoreTime:        &metav1.Time{Time: time.Now()},
+		RestoreTime:        &restoreTime,
 		Restores:           restores,
 		DeletedDataVolumes: deletedDVs,
 		Conditions: []snapshotv1alpha1.Condition{
