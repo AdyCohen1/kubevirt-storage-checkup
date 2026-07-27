@@ -1516,7 +1516,7 @@ func formatMetaTime(t *metav1.Time) string {
 	if t == nil {
 		return "<nil>"
 	}
-	return t.UTC().Format(time.RFC3339)
+	return t.UTC().Format("15:04:05 UTC")
 }
 
 func formatBoolPtr(b *bool) string {

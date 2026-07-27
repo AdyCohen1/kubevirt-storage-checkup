@@ -280,10 +280,10 @@ func successfulRunResults(vmiUnderTestName string) map[string]string {
 		reporter.ConcurrentVMBootKey: "Boot completed on all VMs on time",
 		reporter.VMSnapshotKey: fmt.Sprintf(
 			"VMSnapshot for VM %q succeeded (CreationTime=%s, ReadyToUse=true)",
-			vmiUnderTestName, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).UTC().Format(time.RFC3339)),
+			vmiUnderTestName, time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).UTC().Format("15:04:05 UTC")),
 		reporter.VMRestoreKey: fmt.Sprintf(
 			"VMRestore for VM %q succeeded (RestoreTime=%s, Complete=true)",
-			vmiUnderTestName, time.Date(2026, 1, 2, 3, 5, 6, 0, time.UTC).UTC().Format(time.RFC3339)),
+			vmiUnderTestName, time.Date(2026, 1, 2, 3, 5, 6, 0, time.UTC).UTC().Format("15:04:05 UTC")),
 	}
 }
 
