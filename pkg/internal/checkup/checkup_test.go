@@ -820,12 +820,10 @@ func (cs *clientStub) CreateVirtualMachineSnapshot(ctx context.Context, namespac
 		includedVolumes = append(includedVolumes, volume.Name)
 	}
 
-	contentName := fmt.Sprintf("%s-content", snapshot.Name)
 	readyToUse := true
 	snapshot.Status = &snapshotv1alpha1.VirtualMachineSnapshotStatus{
-		VirtualMachineSnapshotContentName: &contentName,
-		Phase:                             snapshotv1alpha1.Succeeded,
-		ReadyToUse:                        &readyToUse,
+		Phase:      snapshotv1alpha1.Succeeded,
+		ReadyToUse: &readyToUse,
 		Indications: []snapshotv1alpha1.Indication{
 			snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication,
 			snapshotv1alpha1.VMSnapshotGuestAgentIndication,
@@ -851,58 +849,6 @@ func (cs *clientStub) DeleteVirtualMachineSnapshot(ctx context.Context, namespac
 	snapshotFullName := objectFullName(namespace, name)
 	delete(cs.createdSnapshots, snapshotFullName)
 	return nil
-}
-
-func (cs *clientStub) GetVirtualMachineSnapshotContent(ctx context.Context, namespace, name string) (*snapshotv1alpha1.VirtualMachineSnapshotContent, error) {
-	var snapshot *snapshotv1alpha1.VirtualMachineSnapshot
-	for _, s := range cs.createdSnapshots {
-		if s.Status.VirtualMachineSnapshotContentName != nil && *s.Status.VirtualMachineSnapshotContentName == name {
-			snapshot = s
-			break
-		}
-	}
-	if snapshot == nil {
-		return nil, errors.NewNotFound(schema.GroupResource{Group: "snapshot.kubevirt.io", Resource: "virtualmachinesnapshotcontents"}, name)
-	}
-	vmFullName := objectFullName(namespace, snapshot.Spec.Source.Name)
-	vm, exists := cs.createdVMs[vmFullName]
-	if !exists {
-		return nil, errors.NewNotFound(schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachines"}, vmFullName)
-	}
-
-	readyToUse := true
-	var volumeBackups []snapshotv1alpha1.VolumeBackup
-	var volumeSnapshotStatuses []snapshotv1alpha1.VolumeSnapshotStatus
-	for _, volume := range vm.Spec.Template.Spec.Volumes {
-		vsName := fmt.Sprintf("vs-%s", volume.Name)
-		volumeBackups = append(volumeBackups, snapshotv1alpha1.VolumeBackup{
-			VolumeName: volume.Name,
-			PersistentVolumeClaim: snapshotv1alpha1.PersistentVolumeClaim{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: volume.Name,
-				},
-			},
-			VolumeSnapshotName: &vsName,
-		})
-		volumeSnapshotStatuses = append(volumeSnapshotStatuses, snapshotv1alpha1.VolumeSnapshotStatus{
-			VolumeSnapshotName: vsName,
-			ReadyToUse:         &readyToUse,
-		})
-	}
-
-	return &snapshotv1alpha1.VirtualMachineSnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-		},
-		Spec: snapshotv1alpha1.VirtualMachineSnapshotContentSpec{
-			VolumeBackups: volumeBackups,
-		},
-		Status: &snapshotv1alpha1.VirtualMachineSnapshotContentStatus{
-			ReadyToUse:           &readyToUse,
-			VolumeSnapshotStatus: volumeSnapshotStatuses,
-		},
-	}, nil
 }
 
 func (cs *clientStub) CreateVirtualMachineRestore(ctx context.Context, namespace string,

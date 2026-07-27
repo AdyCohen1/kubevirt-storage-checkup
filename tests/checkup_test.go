@@ -181,7 +181,7 @@ func newCheckupRole() *rbacv1.Role {
 			{
 				APIGroups: []string{"kubevirt.io"},
 				Resources: []string{"virtualmachines"},
-				Verbs:     []string{"create", "delete"},
+				Verbs:     []string{"create", "get", "update", "delete"},
 			},
 			{
 				APIGroups: []string{"kubevirt.io"},
@@ -212,11 +212,6 @@ func newCheckupRole() *rbacv1.Role {
 				APIGroups: []string{"snapshot.kubevirt.io"},
 				Resources: []string{"virtualmachinesnapshots", "virtualmachinerestores"},
 				Verbs:     []string{"create", "get", "delete"},
-			},
-			{
-				APIGroups: []string{"snapshot.kubevirt.io"},
-				Resources: []string{"virtualmachinesnapshotcontents"},
-				Verbs:     []string{"get"},
 			},
 		},
 	}

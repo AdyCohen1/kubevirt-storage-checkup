@@ -185,11 +185,6 @@ func (c *Client) DeleteVirtualMachineSnapshot(ctx context.Context, namespace, na
 	return c.VirtualMachineSnapshot(namespace).Delete(ctx, name, metav1.DeleteOptions{})
 }
 
-func (c *Client) GetVirtualMachineSnapshotContent(ctx context.Context, namespace, name string) (
-	*snapshotv1alpha1.VirtualMachineSnapshotContent, error) {
-	return c.VirtualMachineSnapshotContent(namespace).Get(ctx, name, metav1.GetOptions{})
-}
-
 func (c *Client) CreateVirtualMachineRestore(ctx context.Context, namespace string,
 	restore *snapshotv1alpha1.VirtualMachineRestore) (*snapshotv1alpha1.VirtualMachineRestore, error) {
 	return c.VirtualMachineRestore(namespace).Create(ctx, restore, metav1.CreateOptions{})
