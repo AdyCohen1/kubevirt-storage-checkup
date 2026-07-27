@@ -140,7 +140,6 @@ type Checkup struct {
 	goldenImageSnap     *snapshotv1.VolumeSnapshot
 	vmUnderTest         *kvcorev1.VirtualMachine
 	results             status.Results
-	snapshotName        string
 }
 
 type goldenImagesCheckState struct {
@@ -837,10 +836,9 @@ func (c *Checkup) Teardown(ctx context.Context) error {
 		return fmt.Errorf("teardown: %v", err)
 	}
 
-	if c.snapshotName != "" {
-		if err := c.client.DeleteVirtualMachineSnapshot(ctx, c.namespace, c.snapshotName); ignoreNotFound(err) != nil {
-			return fmt.Errorf("teardown: %v", err)
-		}
+	snapshotName := fmt.Sprintf("snapshot-%s", c.vmUnderTest.Name)
+	if err := c.client.DeleteVirtualMachineSnapshot(ctx, c.namespace, snapshotName); ignoreNotFound(err) != nil {
+		return fmt.Errorf("teardown: %v", err)
 	}
 
 	if err := c.client.DeleteVirtualMachine(ctx, c.namespace, c.vmUnderTest.Name); ignoreNotFound(err) != nil {
@@ -1322,7 +1320,6 @@ func (c *Checkup) checkVMSnapshot(ctx context.Context, errStr *string) error {
 	if c.validateVMSnapshot(snapshot, snapshotName, errStr) {
 		return nil
 	}
-	c.snapshotName = snapshotName
 
 	res := fmt.Sprintf("VMSnapshot for VM %q succeeded", vmName)
 	log.Print(res)
@@ -1381,7 +1378,7 @@ func (c *Checkup) checkVMRestore(ctx context.Context, errStr *string) error {
 		c.results.VMRestore = MessageSkipNoVMI
 		return nil
 	}
-	if c.snapshotName == "" {
+	if c.results.VMSnapshot != fmt.Sprintf("VMSnapshot for VM %q succeeded", c.vmUnderTest.Name) {
 		log.Print(MessageSkipNoSnapshot)
 		c.results.VMRestore = MessageSkipNoSnapshot
 		return nil
@@ -1403,7 +1400,7 @@ func (c *Checkup) checkVMRestore(ctx context.Context, errStr *string) error {
 				Kind:     "VirtualMachine",
 				Name:     vmName,
 			},
-			VirtualMachineSnapshotName: c.snapshotName,
+			VirtualMachineSnapshotName: fmt.Sprintf("snapshot-%s", c.vmUnderTest.Name),
 		},
 	}
 
