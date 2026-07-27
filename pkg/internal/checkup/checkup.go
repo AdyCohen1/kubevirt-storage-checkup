@@ -84,7 +84,6 @@ type kubeVirtStorageClient interface {
 		snapshot *snapshotv1alpha1.VirtualMachineSnapshot) (*snapshotv1alpha1.VirtualMachineSnapshot, error)
 	GetVirtualMachineSnapshot(ctx context.Context, namespace, name string) (*snapshotv1alpha1.VirtualMachineSnapshot, error)
 	DeleteVirtualMachineSnapshot(ctx context.Context, namespace, name string) error
-	GetVirtualMachineSnapshotContent(ctx context.Context, namespace, name string) (*snapshotv1alpha1.VirtualMachineSnapshotContent, error)
 	CreateVirtualMachineRestore(ctx context.Context, namespace string, restore *snapshotv1alpha1.VirtualMachineRestore) (*snapshotv1alpha1.VirtualMachineRestore, error)
 	GetVirtualMachineRestore(ctx context.Context, namespace, name string) (*snapshotv1alpha1.VirtualMachineRestore, error)
 	DeleteVirtualMachineRestore(ctx context.Context, namespace, name string) error
