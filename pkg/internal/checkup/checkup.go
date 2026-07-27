@@ -1221,21 +1221,35 @@ func (c *Checkup) validateVMSnapshot(snapshot *snapshotv1alpha1.VirtualMachineSn
 		return true
 	}
 
-	expected := sets.New(
+	actual := sets.New[snapshotv1alpha1.Indication](snapshot.Status.Indications...)
+	allowed := sets.New(
 		snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication,
 		snapshotv1alpha1.VMSnapshotGuestAgentIndication,
+		snapshotv1alpha1.VMSnapshotNoGuestAgentIndication,
 	)
-	actual := sets.New[snapshotv1alpha1.Indication](snapshot.Status.Indications...)
-	if unexpected := actual.Difference(expected); unexpected.Len() > 0 {
+	if unexpected := actual.Difference(allowed); unexpected.Len() > 0 {
 		c.reportVMSnapshotFailure(
 			fmt.Sprintf("VMSnapshot %q has unexpected indication(s): %v", snapshotName, sets.List(unexpected)),
 			errStr,
 		)
 		return true
 	}
-	if missing := expected.Difference(actual); missing.Len() > 0 {
+	if !actual.Has(snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication) {
 		c.reportVMSnapshotFailure(
-			fmt.Sprintf("VMSnapshot %q missing expected indication(s): %v", snapshotName, sets.List(missing)),
+			fmt.Sprintf("VMSnapshot %q missing expected indication %q", snapshotName, snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication),
+			errStr,
+		)
+		return true
+	}
+	hasGuestAgent := actual.Has(snapshotv1alpha1.VMSnapshotGuestAgentIndication)
+	hasNoGuestAgent := actual.Has(snapshotv1alpha1.VMSnapshotNoGuestAgentIndication)
+	if hasGuestAgent == hasNoGuestAgent {
+		c.reportVMSnapshotFailure(
+			fmt.Sprintf("VMSnapshot %q must have exactly one of %q or %q, got %v",
+				snapshotName,
+				snapshotv1alpha1.VMSnapshotGuestAgentIndication,
+				snapshotv1alpha1.VMSnapshotNoGuestAgentIndication,
+				sets.List(actual)),
 			errStr,
 		)
 		return true
