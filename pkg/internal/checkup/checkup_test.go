@@ -89,6 +89,8 @@ var tests = map[string]struct {
 	clientConfig    clientConfig
 	expectedResults map[string]string
 	expectedErr     string
+	resultsContains bool
+	vmiTimeout      time.Duration
 }{
 	"noStorageClasses": {
 		clientConfig: clientConfig{noStorageClasses: true, expectNoVMI: true},
@@ -183,6 +185,95 @@ var tests = map[string]struct {
 		expectedResults: map[string]string{reporter.VMLiveMigrationKey: "failed waiting for VMI \"%s\" migration completed: migration failed"},
 		expectedErr:     "migration failed",
 	},
+	"snapshotWrongPhase": {
+		clientConfig: clientConfig{failSnapshotWrongPhase: true},
+		expectedResults: map[string]string{
+			reporter.VMSnapshotKey: `VMSnapshot "snapshot-%s" phase is Failed, expected Succeeded`,
+			reporter.VMRestoreKey:  checkup.MessageSkipNoSnapshot,
+		},
+		expectedErr: `phase is Failed, expected Succeeded`,
+	},
+	"snapshotBadIndications": {
+		clientConfig: clientConfig{failSnapshotBadIndications: true},
+		expectedResults: map[string]string{
+			reporter.VMSnapshotKey: `VMSnapshot "snapshot-%s" indications [Online] do not equal expected [GuestAgent Online] or [NoGuestAgent Online]`,
+			reporter.VMRestoreKey:  checkup.MessageSkipNoSnapshot,
+		},
+		expectedErr: `do not equal expected`,
+	},
+	"snapshotNoVolumes": {
+		clientConfig: clientConfig{failSnapshotNoVolumes: true},
+		expectedResults: map[string]string{
+			reporter.VMSnapshotKey: `VMSnapshot "snapshot-%s" has no SnapshotVolumes`,
+			reporter.VMRestoreKey:  checkup.MessageSkipNoSnapshot,
+		},
+		expectedErr: `has no SnapshotVolumes`,
+	},
+	"snapshotMissingIncludedVolume": {
+		clientConfig: clientConfig{failSnapshotMissingVolume: true},
+		expectedResults: map[string]string{
+			reporter.VMSnapshotKey: `VMSnapshot "snapshot-%s" included volumes [] do not contain all expected [%s-dv]`,
+			reporter.VMRestoreKey:  checkup.MessageSkipNoSnapshot,
+		},
+		expectedErr: `do not contain all expected`,
+	},
+	"snapshotExcludedExpectedVolume": {
+		clientConfig: clientConfig{failSnapshotExcludedVolume: true},
+		expectedResults: map[string]string{
+			reporter.VMSnapshotKey: `VMSnapshot "snapshot-%s" excluded volumes intersect expected: [%s-dv]`,
+			reporter.VMRestoreKey:  checkup.MessageSkipNoSnapshot,
+		},
+		expectedErr: `excluded volumes intersect expected`,
+	},
+	"snapshotNotReady": {
+		clientConfig:    clientConfig{failSnapshotNotReady: true},
+		vmiTimeout:      time.Millisecond,
+		resultsContains: true,
+		expectedResults: map[string]string{
+			reporter.VMSnapshotKey: `failed waiting for VMSnapshot "snapshot-%s"`,
+			reporter.VMRestoreKey:  checkup.MessageSkipNoSnapshot,
+		},
+		expectedErr: `failed waiting for VMSnapshot`,
+	},
+	"snapshotFailedDuringWait": {
+		clientConfig:    clientConfig{failSnapshotFailedWait: true},
+		resultsContains: true,
+		expectedResults: map[string]string{
+			reporter.VMSnapshotKey: `failed waiting for VMSnapshot "snapshot-%s"`,
+			reporter.VMRestoreKey:  checkup.MessageSkipNoSnapshot,
+		},
+		expectedErr: `snapshot failed`,
+	},
+	"restoreNoVolumeRestores": {
+		clientConfig: clientConfig{failRestoreNoVolumes: true},
+		expectedResults: map[string]string{
+			reporter.VMRestoreKey: `VMRestore "restore-%s" has no volume restores`,
+		},
+		expectedErr: `has no volume restores`,
+	},
+	"restoreMissingVolume": {
+		clientConfig: clientConfig{failRestoreMissingVolume: true},
+		expectedResults: map[string]string{
+			reporter.VMRestoreKey: `VMRestore "restore-%s" restored volumes [other-volume] do not contain all expected [%s-dv]`,
+		},
+		expectedErr: `do not contain all expected`,
+	},
+	"restoreNotComplete": {
+		clientConfig:    clientConfig{failRestoreNotComplete: true},
+		vmiTimeout:      time.Millisecond,
+		resultsContains: true,
+		expectedResults: map[string]string{
+			reporter.VMRestoreKey: `failed waiting for VMRestore "restore-%s"`,
+		},
+		expectedErr: `failed waiting for VMRestore`,
+	},
+	"restoreNoStatus": {
+		clientConfig: clientConfig{failRestoreNoStatus: true},
+		expectedResults: map[string]string{
+			reporter.VMRestoreKey: `VMRestore "restore-%s" has no status`,
+		},
+		expectedErr: `has no status`,
+	},
 	"skipMigrationOnSingleNode": {
 		clientConfig:    clientConfig{singleNode: true},
 		expectedResults: map[string]string{reporter.VMLiveMigrationKey: "Skip check - single node"},
@@ -195,6 +286,9 @@ func TestCheckupShouldReturnErrorWhen(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			testClient := newClientStub(tc.clientConfig)
 			testConfig := newTestConfig()
+			if tc.vmiTimeout > 0 {
+				testConfig.VMITimeout = tc.vmiTimeout
+			}
 
 			testCheckup := checkup.New(testClient, testNamespace, testConfig)
 
@@ -209,10 +303,16 @@ func TestCheckupShouldReturnErrorWhen(t *testing.T) {
 				checkOwnerRef(t, testClient)
 			}
 
-			expectedResults := fullExpectedResults(vmiUnderTestName, tc.expectedResults)
 			actualResults := reporter.FormatResults(testCheckup.Results())
-
-			assert.Equal(t, expectedResults, actualResults)
+			if tc.resultsContains {
+				for key, substr := range tc.expectedResults {
+					substr = strings.ReplaceAll(substr, "%s", vmiUnderTestName)
+					assert.Contains(t, actualResults[key], substr, "key %s", key)
+				}
+			} else {
+				expectedResults := fullExpectedResults(vmiUnderTestName, tc.expectedResults)
+				assert.Equal(t, expectedResults, actualResults)
+			}
 			if tc.expectedErr != "" {
 				assert.ErrorContains(t, err, tc.expectedErr)
 			} else {
@@ -239,9 +339,7 @@ func fullExpectedResults(vmiUnderTestName string, expectedResults map[string]str
 		expectedResultsNoVMI(fullResults)
 	}
 	for key, expectedResult := range expectedResults {
-		if strings.Contains(expectedResult, "%s") {
-			expectedResult = fmt.Sprintf(expectedResult, vmiUnderTestName)
-		}
+		expectedResult = strings.ReplaceAll(expectedResult, "%s", vmiUnderTestName)
 		fullResults[key] = expectedResult
 	}
 	return fullResults
@@ -304,17 +402,29 @@ type clientConfig struct {
 	expectNoVMI                       bool
 	cloneFallback                     bool
 	failMigration                     bool
+	failSnapshotWrongPhase            bool
+	failSnapshotBadIndications        bool
+	failSnapshotNoVolumes             bool
+	failSnapshotMissingVolume         bool
+	failSnapshotExcludedVolume        bool
+	failSnapshotNotReady              bool
+	failSnapshotFailedWait            bool
+	failRestoreNoVolumes              bool
+	failRestoreMissingVolume          bool
+	failRestoreNotComplete            bool
+	failRestoreNoStatus               bool
 	singleNode                        bool
 }
 
 type clientStub struct {
-	createdVMs        map[string]*kvcorev1.VirtualMachine
-	createdVMIs       map[string]*kvcorev1.VirtualMachineInstance
-	createdSnapshots  map[string]*snapshotv1alpha1.VirtualMachineSnapshot
-	createdRestores   map[string]*snapshotv1alpha1.VirtualMachineRestore
-	vmCreationFailure error
-	vmDeletionFailure error
-	vmiGetFailure     error
+	createdVMs               map[string]*kvcorev1.VirtualMachine
+	createdVMIs              map[string]*kvcorev1.VirtualMachineInstance
+	createdSnapshots         map[string]*snapshotv1alpha1.VirtualMachineSnapshot
+	createdRestores          map[string]*snapshotv1alpha1.VirtualMachineRestore
+	restoreCompleteReturned  bool
+	vmCreationFailure        error
+	vmDeletionFailure        error
+	vmiGetFailure            error
 	clientConfig
 }
 
@@ -813,18 +923,52 @@ func (cs *clientStub) CreateVirtualMachineSnapshot(ctx context.Context, namespac
 
 	readyToUse := true
 	creationTime := metav1.Time{Time: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)}
-	snapshot.Status = &snapshotv1alpha1.VirtualMachineSnapshotStatus{
-		Phase:        snapshotv1alpha1.Succeeded,
-		ReadyToUse:   &readyToUse,
-		CreationTime: &creationTime,
-		Indications: []snapshotv1alpha1.Indication{
+
+	phase := snapshotv1alpha1.Succeeded
+	if cs.failSnapshotWrongPhase {
+		phase = snapshotv1alpha1.Failed
+	}
+	if cs.failSnapshotNotReady {
+		readyToUse = false
+		phase = snapshotv1alpha1.InProgress
+	}
+	if cs.failSnapshotFailedWait {
+		readyToUse = false
+		phase = snapshotv1alpha1.Failed
+	}
+
+	indications := []snapshotv1alpha1.Indication{
+		snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication,
+		snapshotv1alpha1.VMSnapshotGuestAgentIndication,
+	}
+	if cs.failSnapshotBadIndications {
+		indications = []snapshotv1alpha1.Indication{
 			snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication,
-			snapshotv1alpha1.VMSnapshotGuestAgentIndication,
-		},
-		SnapshotVolumes: &snapshotv1alpha1.SnapshotVolumesLists{
-			IncludedVolumes: includedVolumes,
-			ExcludedVolumes: []string{},
-		},
+		}
+	}
+
+	var snapshotVolumes *snapshotv1alpha1.SnapshotVolumesLists
+	if !cs.failSnapshotNoVolumes {
+		excluded := []string{}
+		included := includedVolumes
+		if cs.failSnapshotMissingVolume {
+			included = []string{}
+		}
+		if cs.failSnapshotExcludedVolume {
+			excluded = append([]string{}, includedVolumes...)
+		}
+		snapshotVolumes = &snapshotv1alpha1.SnapshotVolumesLists{
+			IncludedVolumes: included,
+			ExcludedVolumes: excluded,
+		}
+	}
+
+	snapshot.Status = &snapshotv1alpha1.VirtualMachineSnapshotStatus{
+		Phase:           phase,
+		ReadyToUse:      &readyToUse,
+		CreationTime:    &creationTime,
+		Indications:     indications,
+		SnapshotVolumes: snapshotVolumes,
 	}
 	return snapshot, nil
 }
@@ -877,6 +1021,20 @@ func (cs *clientStub) CreateVirtualMachineRestore(ctx context.Context, namespace
 
 	complete := true
 	restoreTime := metav1.Time{Time: time.Date(2026, 1, 2, 3, 5, 6, 0, time.UTC)}
+	if cs.failRestoreNotComplete {
+		complete = false
+	}
+	if cs.failRestoreNoVolumes {
+		restores = nil
+	}
+	if cs.failRestoreMissingVolume {
+		restores = []snapshotv1alpha1.VolumeRestore{{
+			VolumeName:                "other-volume",
+			PersistentVolumeClaimName: "other-volume",
+			VolumeSnapshotName:        "vs-other-volume",
+		}}
+	}
+
 	restore.Status = &snapshotv1alpha1.VirtualMachineRestoreStatus{
 		Complete:           &complete,
 		RestoreTime:        &restoreTime,
@@ -902,6 +1060,15 @@ func (cs *clientStub) GetVirtualMachineRestore(ctx context.Context, namespace, n
 	restore, exists := cs.createdRestores[restoreFullName]
 	if !exists {
 		return nil, errors.NewNotFound(schema.GroupResource{Group: "snapshot.kubevirt.io", Resource: "virtualmachinerestores"}, name)
+	}
+	if cs.failRestoreNoStatus {
+		if !cs.restoreCompleteReturned {
+			cs.restoreCompleteReturned = true
+			return restore, nil
+		}
+		noStatus := restore.DeepCopy()
+		noStatus.Status = nil
+		return noStatus, nil
 	}
 	return restore, nil
 }
