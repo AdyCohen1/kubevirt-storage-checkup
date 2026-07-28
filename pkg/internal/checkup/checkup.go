@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -830,29 +831,22 @@ func (c *Checkup) Teardown(ctx context.Context) error {
 		return nil
 	}
 
+	var errs []error
 	restoreName := fmt.Sprintf("restore-%s", c.vmUnderTest.Name)
-	if err := c.client.DeleteVirtualMachineRestore(ctx, c.namespace, restoreName); ignoreNotFound(err) != nil {
-		return fmt.Errorf("teardown: %v", err)
-	}
-
 	snapshotName := fmt.Sprintf("snapshot-%s", c.vmUnderTest.Name)
-	if err := c.client.DeleteVirtualMachineSnapshot(ctx, c.namespace, snapshotName); ignoreNotFound(err) != nil {
-		return fmt.Errorf("teardown: %v", err)
-	}
 
-	if err := c.client.DeleteVirtualMachine(ctx, c.namespace, c.vmUnderTest.Name); ignoreNotFound(err) != nil {
-		return fmt.Errorf("teardown: %v", err)
-	}
+	appendTeardownErr(&errs, "delete restore", restoreName,
+		c.client.DeleteVirtualMachineRestore(ctx, c.namespace, restoreName))
+	appendTeardownErr(&errs, "delete snapshot", snapshotName,
+		c.client.DeleteVirtualMachineSnapshot(ctx, c.namespace, snapshotName))
+	appendTeardownErr(&errs, "delete VM", c.vmUnderTest.Name,
+		c.client.DeleteVirtualMachine(ctx, c.namespace, c.vmUnderTest.Name))
+	appendTeardownErr(&errs, "delete DataVolume", hotplugVolumeName,
+		c.client.DeleteDataVolume(ctx, c.namespace, hotplugVolumeName))
+	appendTeardownErr(&errs, "delete PVC", hotplugVolumeName,
+		c.client.DeletePersistentVolumeClaim(ctx, c.namespace, hotplugVolumeName))
 
-	if err := c.client.DeleteDataVolume(ctx, c.namespace, hotplugVolumeName); ignoreNotFound(err) != nil {
-		return fmt.Errorf("teardown: %v", err)
-	}
-
-	if err := c.client.DeletePersistentVolumeClaim(ctx, c.namespace, hotplugVolumeName); ignoreNotFound(err) != nil {
-		return fmt.Errorf("teardown: %v", err)
-	}
-
-	return nil
+	return flattenErrors("teardown", errs)
 }
 
 func (c *Checkup) Results() status.Results {
@@ -1084,7 +1078,8 @@ func (c *Checkup) checkConcurrentVMIBoot(ctx context.Context, errStr *string) er
 	}
 
 	var wg sync.WaitGroup
-	isBootOk := true
+	var isBootOk atomic.Bool
+	isBootOk.Store(true)
 
 	for i := 0; i < numOfVMs; i++ {
 		wg.Add(1)
@@ -1096,7 +1091,7 @@ func (c *Checkup) checkConcurrentVMIBoot(ctx context.Context, errStr *string) er
 			vm := newVMUnderTest(vmName, c.goldenImagePvc, c.goldenImageSnap, c.checkupConfig, true)
 			if _, err := c.client.CreateVirtualMachine(ctx, c.namespace, vm); err != nil {
 				log.Printf("failed to create VM %q: %s", vmName, err)
-				isBootOk = false
+				isBootOk.Store(false)
 				return
 			}
 
@@ -1109,13 +1104,13 @@ func (c *Checkup) checkConcurrentVMIBoot(ctx context.Context, errStr *string) er
 			var result, errs string
 			if err := c.waitForVMIBoot(ctx, vmName, &result, &errs); err != nil || errs != "" {
 				log.Printf("failed waiting for VM boot %q", vmName)
-				isBootOk = false
+				isBootOk.Store(false)
 			}
 		}()
 	}
 
 	wg.Wait()
-	if !isBootOk {
+	if !isBootOk.Load() {
 		log.Print(ErrBootFailedOnSomeVMs)
 		c.results.ConcurrentVMBoot = ErrBootFailedOnSomeVMs
 		appendSep(errStr, ErrBootFailedOnSomeVMs)
@@ -1222,34 +1217,18 @@ func (c *Checkup) validateVMSnapshot(snapshot *snapshotv1alpha1.VirtualMachineSn
 	}
 
 	actual := sets.New[snapshotv1alpha1.Indication](snapshot.Status.Indications...)
-	allowed := sets.New(
+	withGuestAgent := sets.New(
 		snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication,
 		snapshotv1alpha1.VMSnapshotGuestAgentIndication,
+	)
+	withoutGuestAgent := sets.New(
+		snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication,
 		snapshotv1alpha1.VMSnapshotNoGuestAgentIndication,
 	)
-	if unexpected := actual.Difference(allowed); unexpected.Len() > 0 {
+	if !actual.Equal(withGuestAgent) && !actual.Equal(withoutGuestAgent) {
 		c.reportVMSnapshotFailure(
-			fmt.Sprintf("VMSnapshot %q has unexpected indication(s): %v", snapshotName, sets.List(unexpected)),
-			errStr,
-		)
-		return true
-	}
-	if !actual.Has(snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication) {
-		c.reportVMSnapshotFailure(
-			fmt.Sprintf("VMSnapshot %q missing expected indication %q", snapshotName, snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication),
-			errStr,
-		)
-		return true
-	}
-	hasGuestAgent := actual.Has(snapshotv1alpha1.VMSnapshotGuestAgentIndication)
-	hasNoGuestAgent := actual.Has(snapshotv1alpha1.VMSnapshotNoGuestAgentIndication)
-	if hasGuestAgent == hasNoGuestAgent {
-		c.reportVMSnapshotFailure(
-			fmt.Sprintf("VMSnapshot %q must have exactly one of %q or %q, got %v",
-				snapshotName,
-				snapshotv1alpha1.VMSnapshotGuestAgentIndication,
-				snapshotv1alpha1.VMSnapshotNoGuestAgentIndication,
-				sets.List(actual)),
+			fmt.Sprintf("VMSnapshot %q indications %v do not equal expected %v or %v",
+				snapshotName, sets.List(actual), sets.List(withGuestAgent), sets.List(withoutGuestAgent)),
 			errStr,
 		)
 		return true
@@ -1269,17 +1248,18 @@ func (c *Checkup) validateVMSnapshot(snapshot *snapshotv1alpha1.VirtualMachineSn
 	includedVolumes := sets.New(snapshot.Status.SnapshotVolumes.IncludedVolumes...)
 	excludedVolumes := sets.New(snapshot.Status.SnapshotVolumes.ExcludedVolumes...)
 
-	if missing := expectedVolumes.Difference(includedVolumes); missing.Len() > 0 {
+	if !expectedVolumes.Equal(includedVolumes.Intersection(expectedVolumes)) {
 		c.reportVMSnapshotFailure(
-			fmt.Sprintf("VMSnapshot %q missing expected volume(s): %v (included: %v)",
-				snapshotName, sets.List(missing), sets.List(includedVolumes)),
+			fmt.Sprintf("VMSnapshot %q included volumes %v do not contain all expected %v",
+				snapshotName, sets.List(includedVolumes), sets.List(expectedVolumes)),
 			errStr,
 		)
 		return true
 	}
-	if excluded := expectedVolumes.Intersection(excludedVolumes); excluded.Len() > 0 {
+	if !expectedVolumes.Intersection(excludedVolumes).Equal(sets.New[string]()) {
 		c.reportVMSnapshotFailure(
-			fmt.Sprintf("VMSnapshot %q excluded expected volume(s): %v", snapshotName, sets.List(excluded)),
+			fmt.Sprintf("VMSnapshot %q excluded volumes intersect expected: %v",
+				snapshotName, sets.List(expectedVolumes.Intersection(excludedVolumes))),
 			errStr,
 		)
 		return true
@@ -1490,10 +1470,10 @@ func (c *Checkup) validateVMRestore(restore *snapshotv1alpha1.VirtualMachineRest
 	for _, vr := range restore.Status.Restores {
 		restoredVolumes.Insert(vr.VolumeName)
 	}
-	if missing := expectedVolumes.Difference(restoredVolumes); missing.Len() > 0 {
+	if !expectedVolumes.Equal(restoredVolumes.Intersection(expectedVolumes)) {
 		c.reportVMRestoreFailure(
-			fmt.Sprintf("VMRestore %q missing expected volume(s): %v (restored: %v)",
-				restoreName, sets.List(missing), sets.List(restoredVolumes)),
+			fmt.Sprintf("VMRestore %q restored volumes %v do not contain all expected %v",
+				restoreName, sets.List(restoredVolumes), sets.List(expectedVolumes)),
 			errStr,
 		)
 		return true
@@ -1542,4 +1522,21 @@ func ignoreNotFound(err error) error {
 		return nil
 	}
 	return err
+}
+
+func appendTeardownErr(errs *[]error, action, name string, err error) {
+	if err = ignoreNotFound(err); err != nil {
+		*errs = append(*errs, fmt.Errorf("%s %q: %w", action, name, err))
+	}
+}
+
+func flattenErrors(prefix string, errs []error) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	msgs := make([]string, 0, len(errs))
+	for _, err := range errs {
+		msgs = append(msgs, err.Error())
+	}
+	return fmt.Errorf("%s: %s", prefix, strings.Join(msgs, "; "))
 }

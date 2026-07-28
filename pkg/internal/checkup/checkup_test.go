@@ -49,7 +49,6 @@ import (
 
 const (
 	testNamespace = "target-ns"
-	testNode      = "test-node"
 )
 
 var (
