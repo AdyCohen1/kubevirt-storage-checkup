@@ -244,7 +244,7 @@ func (c *Checkup) Run(ctx context.Context) error {
 }
 
 func (c *Checkup) checkVersions(ctx context.Context) error {
-	log.Print("\n=== Cluster version check ===")
+	log.Print("=== Cluster version check ===\n")
 
 	ocpVersion := ""
 	ver, err := c.client.GetClusterVersion(ctx, "version")
@@ -280,7 +280,7 @@ func (c *Checkup) checkVersions(ctx context.Context) error {
 
 // FIXME: allow providing specific golden image namespace in the config, instead of scanning all namespaces
 func (c *Checkup) checkGoldenImages(ctx context.Context, namespaces *corev1.NamespaceList, errStr *string) error {
-	log.Print("\n=== Golden images check ===")
+	log.Print("=== Golden images check ===\n")
 
 	const defaultGoldenImagesNamespace = "openshift-virtualization-os-images"
 	var cs goldenImagesCheckState
@@ -448,7 +448,7 @@ func (c *Checkup) updateGoldenImageSnapshot(snap *snapshotv1.VolumeSnapshot) {
 }
 
 func (c *Checkup) checkDefaultStorageClass(scs *storagev1.StorageClassList, errStr *string) {
-	log.Print("\n=== Default storage class check ===")
+	log.Print("=== Default storage class check ===\n")
 
 	var multipleDefaultStorageClasses, hasDefaultVirtStorageClass, hasDefaultStorageClass bool
 	for i := range scs.Items {
@@ -485,7 +485,7 @@ func (c *Checkup) checkDefaultStorageClass(scs *storagev1.StorageClassList, errS
 }
 
 func (c *Checkup) checkPVCCreationAndBinding(ctx context.Context, errStr *string) error {
-	log.Print("\n=== PVC creation and binding check ===")
+	log.Print("=== PVC creation and binding check ===\n")
 
 	if c.defaultStorageClass == "" && c.checkupConfig.StorageClass == "" {
 		log.Print(MessageSkipNoDefaultStorageClass)
@@ -584,7 +584,7 @@ func (c *Checkup) checkStorageProfiles(ctx context.Context, sps *cdiv1.StoragePr
 	spWithSmartClone := ""
 	spWithRWX := ""
 
-	log.Print("\n=== Storage profiles check ===")
+	log.Print("=== Storage profiles check ===\n")
 	for i := range sps.Items {
 		sp := &sps.Items[i]
 		provisioner := sp.Status.Provisioner
@@ -642,7 +642,7 @@ func hasRWX(cpSets []cdiv1.ClaimPropertySet) bool {
 }
 
 func (c *Checkup) checkVolumeSnapShotClasses(sps *cdiv1.StorageProfileList, vscs *snapshotv1.VolumeSnapshotClassList, _ *string) {
-	log.Print("\n=== Volume snapshot classes check ===")
+	log.Print("=== Volume snapshot classes check ===\n")
 
 	spNames := ""
 	for i := range sps.Items {
@@ -680,7 +680,7 @@ func hasDriver(vscs *snapshotv1.VolumeSnapshotClassList, driver string) bool {
 func (c *Checkup) checkVMIs(ctx context.Context, namespaces *corev1.NamespaceList, scs *storagev1.StorageClassList, errStr *string) error {
 	var vmisWithNonVirtRbdSC, vmisWithUnsetEfsSC string
 
-	log.Print("\n=== VMI storage validation check ===")
+	log.Print("=== VMI storage validation check ===\n")
 	virtSC, err := c.getVirtStorageClass(scs)
 	if err != nil {
 		return err
@@ -869,7 +869,7 @@ func (c *Checkup) Config() config.Config {
 }
 
 func (c *Checkup) checkVMIBoot(ctx context.Context, errStr *string) (bool, error) {
-	log.Print("\n=== VM boot check ===")
+	log.Print("=== VM boot check ===\n")
 
 	if c.defaultStorageClass == "" && c.checkupConfig.StorageClass == "" {
 		log.Print(MessageSkipNoDefaultStorageClass)
@@ -920,7 +920,7 @@ func (c *Checkup) checkVMIBoot(ctx context.Context, errStr *string) (bool, error
 }
 
 func (c *Checkup) checkVMILiveMigration(ctx context.Context, errStr *string) error {
-	log.Print("\n=== VM live migration check ===")
+	log.Print("=== VM live migration check ===\n")
 
 	if c.vmUnderTest == nil {
 		log.Print(MessageSkipNoVMI)
@@ -988,7 +988,7 @@ func (c *Checkup) checkVMILiveMigration(ctx context.Context, errStr *string) err
 }
 
 func (c *Checkup) checkVMIHotplugVolume(ctx context.Context, errStr *string) error {
-	log.Print("\n=== VM hotplug volume check ===")
+	log.Print("=== VM hotplug volume check ===\n")
 
 	if c.vmUnderTest == nil {
 		log.Print(MessageSkipNoVMI)
@@ -1075,7 +1075,7 @@ func (c *Checkup) checkVMIHotplugVolume(ctx context.Context, errStr *string) err
 
 func (c *Checkup) checkConcurrentVMIBoot(ctx context.Context, errStr *string) error {
 	numOfVMs := c.checkupConfig.NumOfVMs
-	log.Printf("\n=== Concurrent VM boot check (numOfVMs: %d) ===", numOfVMs)
+	log.Printf("=== Concurrent VM boot check (numOfVMs: %d) ===\n", numOfVMs)
 
 	if c.defaultStorageClass == "" && c.checkupConfig.StorageClass == "" {
 		log.Print(MessageSkipNoDefaultStorageClass)
@@ -1327,7 +1327,7 @@ func (c *Checkup) validateVMSnapshot(snapshot *snapshotv1alpha1.VirtualMachineSn
 }
 
 func (c *Checkup) checkVMSnapshot(ctx context.Context, errStr *string) error {
-	log.Print("\n=== VM snapshot check ===")
+	log.Print("=== VM snapshot check ===\n")
 	apiGroup := "kubevirt.io"
 	// if no VM created: skip that test
 	if c.vmUnderTest == nil {
@@ -1413,7 +1413,7 @@ func (c *Checkup) stopVMUnderTest(ctx context.Context) error {
 }
 
 func (c *Checkup) checkVMRestore(ctx context.Context, errStr *string) error {
-	log.Print("\n=== VM restore check ===")
+	log.Print("=== VM restore check ===\n")
 	apiGroup := "kubevirt.io"
 
 	if c.vmUnderTest == nil {
