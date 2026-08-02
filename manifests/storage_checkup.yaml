@@ -5,10 +5,7 @@ metadata:
   name: storage-checkup-config
   namespace: $CHECKUP_NAMESPACE
 data:
-  # Overall job limit; must exceed vmiTimeout (10m) so one slow wait cannot consume the whole run (default 10m).
-  # Per-step wait for boot/migration/hotplug/snapshot/restore; raised for slow first-boot/guest-agent (default 3m).
-  spec.timeout: 20m
-  spec.param.vmiTimeout: 10m
+  spec.timeout: 10m
 ---
 apiVersion: batch/v1
 kind: Job
