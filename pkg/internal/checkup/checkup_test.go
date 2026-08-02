@@ -182,48 +182,53 @@ var tests = map[string]struct {
 	},
 	"migrationFails": {
 		clientConfig:    clientConfig{failMigration: true},
-		expectedResults: map[string]string{reporter.VMLiveMigrationKey: "failed waiting for VMI \"%s\" migration completed: migration failed"},
+		expectedResults: map[string]string{reporter.VMLiveMigrationKey: "VM live migration check failed (VMI \"%s\"): migration failed"},
 		expectedErr:     "migration failed",
 	},
 	"snapshotWrongPhase": {
-		clientConfig: clientConfig{failSnapshotWrongPhase: true},
+		clientConfig:    clientConfig{failSnapshotWrongPhase: true},
+		resultsContains: true,
 		expectedResults: map[string]string{
 			reporter.VMSnapshotKey: `VMSnapshot "snapshot-%s" phase is Failed, expected Succeeded`,
 			reporter.VMRestoreKey:  checkup.MessageSkipNoSnapshot,
 		},
-		expectedErr: `phase is Failed, expected Succeeded`,
+		expectedErr: `VM snapshot check failed: snapshot did not succeed`,
 	},
 	"snapshotBadIndications": {
-		clientConfig: clientConfig{failSnapshotBadIndications: true},
+		clientConfig:    clientConfig{failSnapshotBadIndications: true},
+		resultsContains: true,
 		expectedResults: map[string]string{
 			reporter.VMSnapshotKey: `VMSnapshot "snapshot-%s" indications [Online] do not equal expected [GuestAgent Online] or [NoGuestAgent Online]`,
 			reporter.VMRestoreKey:  checkup.MessageSkipNoSnapshot,
 		},
-		expectedErr: `do not equal expected`,
+		expectedErr: `VM snapshot check failed: unexpected snapshot indications`,
 	},
 	"snapshotNoVolumes": {
-		clientConfig: clientConfig{failSnapshotNoVolumes: true},
+		clientConfig:    clientConfig{failSnapshotNoVolumes: true},
+		resultsContains: true,
 		expectedResults: map[string]string{
 			reporter.VMSnapshotKey: `VMSnapshot "snapshot-%s" has no SnapshotVolumes`,
 			reporter.VMRestoreKey:  checkup.MessageSkipNoSnapshot,
 		},
-		expectedErr: `has no SnapshotVolumes`,
+		expectedErr: `VM snapshot check failed: no volumes were included in the snapshot`,
 	},
 	"snapshotMissingIncludedVolume": {
-		clientConfig: clientConfig{failSnapshotMissingVolume: true},
+		clientConfig:    clientConfig{failSnapshotMissingVolume: true},
+		resultsContains: true,
 		expectedResults: map[string]string{
 			reporter.VMSnapshotKey: `VMSnapshot "snapshot-%s" included volumes [] do not contain all expected [%s-dv]`,
 			reporter.VMRestoreKey:  checkup.MessageSkipNoSnapshot,
 		},
-		expectedErr: `do not contain all expected`,
+		expectedErr: `VM snapshot check failed: some expected volumes were not included`,
 	},
 	"snapshotExcludedExpectedVolume": {
-		clientConfig: clientConfig{failSnapshotExcludedVolume: true},
+		clientConfig:    clientConfig{failSnapshotExcludedVolume: true},
+		resultsContains: true,
 		expectedResults: map[string]string{
 			reporter.VMSnapshotKey: `VMSnapshot "snapshot-%s" excluded volumes intersect expected: [%s-dv]`,
 			reporter.VMRestoreKey:  checkup.MessageSkipNoSnapshot,
 		},
-		expectedErr: `excluded volumes intersect expected`,
+		expectedErr: `VM snapshot check failed: expected volumes were excluded`,
 	},
 	"snapshotNotReady": {
 		clientConfig:    clientConfig{failSnapshotNotReady: true},
@@ -233,7 +238,7 @@ var tests = map[string]struct {
 			reporter.VMSnapshotKey: `failed waiting for VMSnapshot "snapshot-%s"`,
 			reporter.VMRestoreKey:  checkup.MessageSkipNoSnapshot,
 		},
-		expectedErr: `failed waiting for VMSnapshot`,
+		expectedErr: `VM snapshot check failed: snapshot was not ready`,
 	},
 	"snapshotFailedDuringWait": {
 		clientConfig:    clientConfig{failSnapshotFailedWait: true},
@@ -242,21 +247,23 @@ var tests = map[string]struct {
 			reporter.VMSnapshotKey: `failed waiting for VMSnapshot "snapshot-%s"`,
 			reporter.VMRestoreKey:  checkup.MessageSkipNoSnapshot,
 		},
-		expectedErr: `snapshot failed`,
+		expectedErr: `VM snapshot check failed: snapshot failed`,
 	},
 	"restoreNoVolumeRestores": {
-		clientConfig: clientConfig{failRestoreNoVolumes: true},
+		clientConfig:    clientConfig{failRestoreNoVolumes: true},
+		resultsContains: true,
 		expectedResults: map[string]string{
 			reporter.VMRestoreKey: `VMRestore "restore-%s" has no volume restores`,
 		},
-		expectedErr: `has no volume restores`,
+		expectedErr: `VM restore check failed: no volumes were restored`,
 	},
 	"restoreMissingVolume": {
-		clientConfig: clientConfig{failRestoreMissingVolume: true},
+		clientConfig:    clientConfig{failRestoreMissingVolume: true},
+		resultsContains: true,
 		expectedResults: map[string]string{
 			reporter.VMRestoreKey: `VMRestore "restore-%s" restored volumes [other-volume] do not contain all expected [%s-dv]`,
 		},
-		expectedErr: `do not contain all expected`,
+		expectedErr: `VM restore check failed: some expected volumes were not restored`,
 	},
 	"restoreNotComplete": {
 		clientConfig:    clientConfig{failRestoreNotComplete: true},
@@ -265,18 +272,19 @@ var tests = map[string]struct {
 		expectedResults: map[string]string{
 			reporter.VMRestoreKey: `failed waiting for VMRestore "restore-%s"`,
 		},
-		expectedErr: `failed waiting for VMRestore`,
+		expectedErr: `VM restore check failed: restore did not complete`,
 	},
 	"restoreNoStatus": {
-		clientConfig: clientConfig{failRestoreNoStatus: true},
+		clientConfig:    clientConfig{failRestoreNoStatus: true},
+		resultsContains: true,
 		expectedResults: map[string]string{
 			reporter.VMRestoreKey: `VMRestore "restore-%s" has no status`,
 		},
-		expectedErr: `has no status`,
+		expectedErr: `VM restore check failed: restore has no status`,
 	},
 	"skipMigrationOnSingleNode": {
 		clientConfig:    clientConfig{singleNode: true},
-		expectedResults: map[string]string{reporter.VMLiveMigrationKey: "Skip check - single node"},
+		expectedResults: map[string]string{reporter.VMLiveMigrationKey: checkup.MessageSkipSingleNode},
 		expectedErr:     "",
 	},
 }
@@ -369,10 +377,10 @@ func successfulRunResults(vmiUnderTestName string) map[string]string {
 		reporter.GoldenImagesNoDataSourceKey:                  "",
 		reporter.VMsWithNonVirtRbdStorageClassKey:             "",
 		reporter.VMsWithUnsetEfsStorageClassKey:               "",
-		reporter.VMBootFromGoldenImageKey:                     fmt.Sprintf("VMI %q successfully booted", vmiUnderTestName),
+		reporter.VMBootFromGoldenImageKey:                     fmt.Sprintf("VM boot check passed (VMI %q)", vmiUnderTestName),
 		reporter.VMVolumeCloneKey:                             "DV cloneType: \"\"",
-		reporter.VMLiveMigrationKey:                           fmt.Sprintf("VMI %q migration completed", vmiUnderTestName),
-		reporter.VMHotplugVolumeKey: fmt.Sprintf("VMI %q hotplug volume ready\nVMI %q hotplug volume removed",
+		reporter.VMLiveMigrationKey:                           fmt.Sprintf("VM live migration check passed (VMI %q)", vmiUnderTestName),
+		reporter.VMHotplugVolumeKey: fmt.Sprintf("VM hotplug attach check passed (VMI %q)\nVM hotplug detach check passed (VMI %q)",
 			vmiUnderTestName, vmiUnderTestName),
 		reporter.ConcurrentVMBootKey: "Boot completed on all VMs on time",
 		reporter.VMSnapshotKey: fmt.Sprintf(

@@ -100,23 +100,24 @@ const (
 	AnnDefaultVirtStorageClass = "storageclass.kubevirt.io/is-default-virt-class"
 	AnnDefaultStorageClass     = "storageclass.kubernetes.io/is-default-class"
 
-	ErrNoDefaultStorageClass         = "no default storage class"
-	ErrPvcNotBound                   = "pvc failed to bound"
-	ErrMultipleDefaultStorageClasses = "there are multiple default storage classes"
-	ErrEmptyClaimPropertySets        = "there are StorageProfiles with empty ClaimPropertySets (unknown provisioners)"
+	ErrNoDefaultStorageClass         = "No default storage class found. Set a default StorageClass on the cluster or provide one via spec.param.storageClass"
+	ErrPvcNotBound                   = "PVC binding check failed: a test PVC did not bind within the timeout. Check that the storage provisioner is healthy and the StorageClass is functional"
+	ErrMultipleDefaultStorageClasses = "Multiple default storage classes found. Ensure only one StorageClass is annotated as default"
+	ErrEmptyClaimPropertySets        = "Some StorageProfiles have empty ClaimPropertySets (unknown provisioners). Check that all provisioners are properly configured"
 	// FIXME: need to decide of we want to return errors in this cases
 	// errMissingVolumeSnapshotClass    = "there are StorageProfiles missing VolumeSnapshotClass"
 	// errVMsWithNonVirtRbdStorageClass = "there are VMs using the plain RBD storageclass when the virtualization storageclass exists"
-	ErrVMsWithUnsetEfsStorageClass   = "there are VMs using an EFS storageclass where the gid and uid are not set in the storageclass"
-	ErrGoldenImagesNotUpToDate       = "there are golden images whose DataImportCron is not up to date or DataSource is not ready"
-	ErrGoldenImageNoDataSource       = "dataSource has no PVC or Snapshot source"
-	ErrBootFailedOnSomeVMs           = "some of the VMs failed to complete boot on time"
+	ErrVMsWithUnsetEfsStorageClass   = "VMs are using an EFS StorageClass where uid/gid are not set. Configure uid and gid in the StorageClass parameters"
+	ErrGoldenImagesNotUpToDate       = "Golden images are not up to date: DataImportCron is not current or DataSource is not ready"
+	ErrGoldenImageNoDataSource       = "Golden image DataSource has no PVC or Snapshot source configured"
+	ErrBootFailedOnSomeVMs           = "Concurrent VM boot check failed: one or more VMs did not boot successfully. Check the logs and the concurrentVMBoot result for details"
 	MessageBootCompletedOnAllVMs     = "Boot completed on all VMs on time"
-	MessageSkipNoDefaultStorageClass = "Skip check - no default storage class"
-	MessageSkipNoGoldenImage         = "Skip check - no golden image PVC or Snapshot"
-	MessageSkipNoVMI                 = "Skip check - no VMI"
-	MessageSkipNoSnapshot            = "Skip check - no VM snapshot"
-	MessageSkipSingleNode            = "Skip check - single node"
+	MessageSkipNoDefaultStorageClass = "Skipped - no default storage class"
+	MessageSkipNoGoldenImage         = "Skipped - no golden image PVC or Snapshot"
+	MessageSkipNoVMI                 = "Skipped - no VMI"
+	MessageSkipNoSnapshot            = "Skipped - no VM snapshot"
+	MessageSkipSingleNode            = "Skipped - single node"
+	MessageSkipBootFailed            = "Skipped - VM boot check failed"
 
 	pollInterval = 5 * time.Second
 )
@@ -204,21 +205,31 @@ func (c *Checkup) Run(ctx context.Context) error {
 		return err
 	}
 
-	if err := c.checkVMIBoot(ctx, &errStr); err != nil {
-		return err
-	}
-	if err := c.checkVMILiveMigration(ctx, &errStr); err != nil {
-		return err
-	}
-	if err := c.checkVMIHotplugVolume(ctx, &errStr); err != nil {
+	bootOk, err := c.checkVMIBoot(ctx, &errStr)
+	if err != nil {
 		return err
 	}
 
-	if err := c.checkVMSnapshot(ctx, &errStr); err != nil {
-		return err
-	}
-	if err := c.checkVMRestore(ctx, &errStr); err != nil {
-		return err
+	if !bootOk {
+		log.Print(MessageSkipBootFailed)
+		c.results.VMLiveMigration = MessageSkipBootFailed
+		c.results.VMHotplugVolume = MessageSkipBootFailed
+		c.results.VMSnapshot = MessageSkipBootFailed
+		c.results.VMRestore = MessageSkipBootFailed
+	} else {
+		if err := c.checkVMILiveMigration(ctx, &errStr); err != nil {
+			return err
+		}
+		if err := c.checkVMIHotplugVolume(ctx, &errStr); err != nil {
+			return err
+		}
+
+		if err := c.checkVMSnapshot(ctx, &errStr); err != nil {
+			return err
+		}
+		if err := c.checkVMRestore(ctx, &errStr); err != nil {
+			return err
+		}
 	}
 
 	if err := c.checkConcurrentVMIBoot(ctx, &errStr); err != nil {
@@ -233,7 +244,7 @@ func (c *Checkup) Run(ctx context.Context) error {
 }
 
 func (c *Checkup) checkVersions(ctx context.Context) error {
-	log.Print("checkVersions")
+	log.Print("\n=== Cluster version check ===")
 
 	ocpVersion := ""
 	ver, err := c.client.GetClusterVersion(ctx, "version")
@@ -269,7 +280,7 @@ func (c *Checkup) checkVersions(ctx context.Context) error {
 
 // FIXME: allow providing specific golden image namespace in the config, instead of scanning all namespaces
 func (c *Checkup) checkGoldenImages(ctx context.Context, namespaces *corev1.NamespaceList, errStr *string) error {
-	log.Print("checkGoldenImages")
+	log.Print("\n=== Golden images check ===")
 
 	const defaultGoldenImagesNamespace = "openshift-virtualization-os-images"
 	var cs goldenImagesCheckState
@@ -437,7 +448,7 @@ func (c *Checkup) updateGoldenImageSnapshot(snap *snapshotv1.VolumeSnapshot) {
 }
 
 func (c *Checkup) checkDefaultStorageClass(scs *storagev1.StorageClassList, errStr *string) {
-	log.Print("checkDefaultStorageClass")
+	log.Print("\n=== Default storage class check ===")
 
 	var multipleDefaultStorageClasses, hasDefaultVirtStorageClass, hasDefaultStorageClass bool
 	for i := range scs.Items {
@@ -474,7 +485,7 @@ func (c *Checkup) checkDefaultStorageClass(scs *storagev1.StorageClassList, errS
 }
 
 func (c *Checkup) checkPVCCreationAndBinding(ctx context.Context, errStr *string) error {
-	log.Print("checkPVCCreationAndBinding")
+	log.Print("\n=== PVC creation and binding check ===")
 
 	if c.defaultStorageClass == "" && c.checkupConfig.StorageClass == "" {
 		log.Print(MessageSkipNoDefaultStorageClass)
@@ -573,7 +584,7 @@ func (c *Checkup) checkStorageProfiles(ctx context.Context, sps *cdiv1.StoragePr
 	spWithSmartClone := ""
 	spWithRWX := ""
 
-	log.Print("checkStorageProfiles")
+	log.Print("\n=== Storage profiles check ===")
 	for i := range sps.Items {
 		sp := &sps.Items[i]
 		provisioner := sp.Status.Provisioner
@@ -631,7 +642,7 @@ func hasRWX(cpSets []cdiv1.ClaimPropertySet) bool {
 }
 
 func (c *Checkup) checkVolumeSnapShotClasses(sps *cdiv1.StorageProfileList, vscs *snapshotv1.VolumeSnapshotClassList, _ *string) {
-	log.Print("checkVolumeSnapShotClasses")
+	log.Print("\n=== Volume snapshot classes check ===")
 
 	spNames := ""
 	for i := range sps.Items {
@@ -669,7 +680,7 @@ func hasDriver(vscs *snapshotv1.VolumeSnapshotClassList, driver string) bool {
 func (c *Checkup) checkVMIs(ctx context.Context, namespaces *corev1.NamespaceList, scs *storagev1.StorageClassList, errStr *string) error {
 	var vmisWithNonVirtRbdSC, vmisWithUnsetEfsSC string
 
-	log.Print("checkVMIs")
+	log.Print("\n=== VMI storage validation check ===")
 	virtSC, err := c.getVirtStorageClass(scs)
 	if err != nil {
 		return err
@@ -857,40 +868,41 @@ func (c *Checkup) Config() config.Config {
 	return c.checkupConfig
 }
 
-func (c *Checkup) checkVMIBoot(ctx context.Context, errStr *string) error {
-	log.Print("checkVMIBoot")
+func (c *Checkup) checkVMIBoot(ctx context.Context, errStr *string) (bool, error) {
+	log.Print("\n=== VM boot check ===")
 
 	if c.defaultStorageClass == "" && c.checkupConfig.StorageClass == "" {
 		log.Print(MessageSkipNoDefaultStorageClass)
 		c.results.VMBootFromGoldenImage = MessageSkipNoDefaultStorageClass
-		return nil
+		return true, nil
 	}
 
 	if c.goldenImagePvc == nil && c.goldenImageSnap == nil {
 		log.Print(MessageSkipNoGoldenImage)
 		c.results.VMBootFromGoldenImage = MessageSkipNoGoldenImage
-		return nil
+		return true, nil
 	}
 
 	vmName := uniqueVMName()
 	c.vmUnderTest = newVMUnderTest(vmName, c.goldenImagePvc, c.goldenImageSnap, c.checkupConfig, false)
 	log.Printf("Creating VM %q", vmName)
 	if _, err := c.client.CreateVirtualMachine(ctx, c.namespace, c.vmUnderTest); err != nil {
-		return fmt.Errorf("failed to create VM: %w", err)
+		return false, fmt.Errorf("failed to create VM: %w", err)
 	}
 
-	if err := c.waitForVMIBoot(ctx, vmName, &c.results.VMBootFromGoldenImage, errStr); err != nil {
-		return err
+	bootOk, err := c.waitForVMIBoot(ctx, vmName, &c.results.VMBootFromGoldenImage, errStr)
+	if err != nil {
+		return false, err
 	}
 
 	if c.goldenImageSnap != nil {
 		c.results.VMVolumeClone = "DV cloneType: snapshot"
-		return nil
+		return bootOk, nil
 	}
 
 	pvc, err := c.client.GetPersistentVolumeClaim(ctx, c.namespace, getVMDvName(vmName))
 	if err != nil {
-		return err
+		return bootOk, err
 	}
 	cloneType := pvc.Annotations["cdi.kubevirt.io/cloneType"]
 	c.results.VMVolumeClone = fmt.Sprintf("DV cloneType: %q", cloneType)
@@ -904,11 +916,11 @@ func (c *Checkup) checkVMIBoot(ctx context.Context, errStr *string) error {
 		}
 	}
 
-	return nil
+	return bootOk, nil
 }
 
 func (c *Checkup) checkVMILiveMigration(ctx context.Context, errStr *string) error {
-	log.Print("checkVMILiveMigration")
+	log.Print("\n=== VM live migration check ===")
 
 	if c.vmUnderTest == nil {
 		log.Print(MessageSkipNoVMI)
@@ -957,7 +969,7 @@ func (c *Checkup) checkVMILiveMigration(ctx context.Context, errStr *string) err
 		return fmt.Errorf("failed to create VMI LiveMigration: %w", err)
 	}
 
-	if err := c.waitForVMIStatus(ctx, vmName, "migration completed", &c.results.VMLiveMigration, errStr,
+	if _, err := c.waitForVMIStatus(ctx, vmName, "live migration", &c.results.VMLiveMigration, errStr,
 		func(vmi *kvcorev1.VirtualMachineInstance) (done bool, err error) {
 			if ms := vmi.Status.MigrationState; ms != nil {
 				if ms.Completed {
@@ -976,7 +988,7 @@ func (c *Checkup) checkVMILiveMigration(ctx context.Context, errStr *string) err
 }
 
 func (c *Checkup) checkVMIHotplugVolume(ctx context.Context, errStr *string) error {
-	log.Print("checkVMIHotplugVolume")
+	log.Print("\n=== VM hotplug volume check ===")
 
 	if c.vmUnderTest == nil {
 		log.Print(MessageSkipNoVMI)
@@ -1023,7 +1035,7 @@ func (c *Checkup) checkVMIHotplugVolume(ctx context.Context, errStr *string) err
 		return err
 	}
 
-	if err := c.waitForVMIStatus(ctx, vmName, "hotplug volume ready", &c.results.VMHotplugVolume, errStr,
+	if _, err := c.waitForVMIStatus(ctx, vmName, "hotplug attach", &c.results.VMHotplugVolume, errStr,
 		func(vmi *kvcorev1.VirtualMachineInstance) (done bool, err error) {
 			for i := range vmi.Status.VolumeStatus {
 				vs := vmi.Status.VolumeStatus[i]
@@ -1045,7 +1057,7 @@ func (c *Checkup) checkVMIHotplugVolume(ctx context.Context, errStr *string) err
 		return err
 	}
 
-	if err := c.waitForVMIStatus(ctx, vmName, "hotplug volume removed", &c.results.VMHotplugVolume, errStr,
+	if _, err := c.waitForVMIStatus(ctx, vmName, "hotplug detach", &c.results.VMHotplugVolume, errStr,
 		func(vmi *kvcorev1.VirtualMachineInstance) (done bool, err error) {
 			for i := range vmi.Status.VolumeStatus {
 				vs := vmi.Status.VolumeStatus[i]
@@ -1063,7 +1075,7 @@ func (c *Checkup) checkVMIHotplugVolume(ctx context.Context, errStr *string) err
 
 func (c *Checkup) checkConcurrentVMIBoot(ctx context.Context, errStr *string) error {
 	numOfVMs := c.checkupConfig.NumOfVMs
-	log.Printf("checkConcurrentVMIBoot numOfVMs:%d", numOfVMs)
+	log.Printf("\n=== Concurrent VM boot check (numOfVMs: %d) ===", numOfVMs)
 
 	if c.defaultStorageClass == "" && c.checkupConfig.StorageClass == "" {
 		log.Print(MessageSkipNoDefaultStorageClass)
@@ -1102,7 +1114,7 @@ func (c *Checkup) checkConcurrentVMIBoot(ctx context.Context, errStr *string) er
 			}()
 
 			var result, errs string
-			if err := c.waitForVMIBoot(ctx, vmName, &result, &errs); err != nil || errs != "" {
+			if ok, err := c.waitForVMIBoot(ctx, vmName, &result, &errs); err != nil || !ok {
 				log.Printf("failed waiting for VM boot %q", vmName)
 				isBootOk.Store(false)
 			}
@@ -1123,8 +1135,8 @@ func (c *Checkup) checkConcurrentVMIBoot(ctx context.Context, errStr *string) er
 	return nil
 }
 
-func (c *Checkup) waitForVMIBoot(ctx context.Context, vmName string, result, errStr *string) error {
-	return c.waitForVMIStatus(ctx, vmName, "successfully booted", result, errStr,
+func (c *Checkup) waitForVMIBoot(ctx context.Context, vmName string, result, errStr *string) (bool, error) {
+	return c.waitForVMIStatus(ctx, vmName, "boot", result, errStr,
 		func(vmi *kvcorev1.VirtualMachineInstance) (done bool, err error) {
 			for i := range vmi.Status.Conditions {
 				condition := vmi.Status.Conditions[i]
@@ -1143,8 +1155,8 @@ func uniqueVMName() string {
 
 type checkVMIStatusFn func(*kvcorev1.VirtualMachineInstance) (done bool, err error)
 
-func (c *Checkup) waitForVMIStatus(ctx context.Context, vmName, checkMsg string, result, errStr *string,
-	checkVMIStatus checkVMIStatusFn) error {
+func (c *Checkup) waitForVMIStatus(ctx context.Context, vmName, checkName string, result, errStr *string,
+	checkVMIStatus checkVMIStatusFn) (bool, error) {
 	conditionFn := func(ctx context.Context) (bool, error) {
 		vmi, err := c.client.GetVirtualMachineInstance(ctx, c.namespace, vmName)
 		if err != nil {
@@ -1153,26 +1165,56 @@ func (c *Checkup) waitForVMIStatus(ctx context.Context, vmName, checkMsg string,
 		return checkVMIStatus(vmi)
 	}
 
-	log.Printf("Waiting for VMI %q %s", vmName, checkMsg)
+	log.Printf("Waiting for VM %s check (VMI %q)...", checkName, vmName)
 	if err := wait.PollImmediateWithContext(ctx, pollInterval, c.checkupConfig.VMITimeout, conditionFn); err != nil {
-		res := fmt.Sprintf("failed waiting for VMI %q %s: %v", vmName, checkMsg, err)
-		log.Print(res)
-		appendSep(result, res)
-		appendSep(errStr, res)
-		return nil
+		var detail, customerMsg string
+		if errors.Is(err, wait.ErrWaitTimeout) {
+			vmiStatus := c.getVMIStatusSummary(ctx, vmName)
+			detail = fmt.Sprintf("VM %s check failed (VMI %q): did not complete within %s (%s)",
+				checkName, vmName, c.checkupConfig.VMITimeout, vmiStatus)
+			customerMsg = fmt.Sprintf("VM %s check failed: did not complete within %s (%s). Consider increasing spec.param.vmiTimeout",
+				checkName, c.checkupConfig.VMITimeout, vmiStatus)
+		} else {
+			detail = fmt.Sprintf("VM %s check failed (VMI %q): %v", checkName, vmName, err)
+			customerMsg = fmt.Sprintf("VM %s check failed: %v", checkName, err)
+		}
+		log.Print(detail)
+		appendSep(result, detail)
+		appendSep(errStr, customerMsg)
+		return false, nil
 	}
-	res := fmt.Sprintf("VMI %q %s", vmName, checkMsg)
+	res := fmt.Sprintf("VM %s check passed (VMI %q)", checkName, vmName)
 	log.Print(res)
 	appendSep(result, res)
 
-	return nil
+	return true, nil
 }
 
-// helper function to report VMSnapshot failure
-func (c *Checkup) reportVMSnapshotFailure(res string, errStr *string) {
-	log.Print(res)
-	appendSep(&c.results.VMSnapshot, res)
-	appendSep(errStr, res)
+func (c *Checkup) getVMIStatusSummary(ctx context.Context, vmName string) string {
+	vmi, err := c.client.GetVirtualMachineInstance(ctx, c.namespace, vmName)
+	if err != nil {
+		return fmt.Sprintf("unable to get VMI status: %v", err)
+	}
+
+	readyStatus := "unknown"
+	for i := range vmi.Status.Conditions {
+		cond := vmi.Status.Conditions[i]
+		if cond.Type == kvcorev1.VirtualMachineInstanceReady {
+			readyStatus = string(cond.Status)
+			if cond.Message != "" {
+				readyStatus += ": " + cond.Message
+			}
+			break
+		}
+	}
+
+	return fmt.Sprintf("phase: %s, ready: %s", vmi.Status.Phase, readyStatus)
+}
+
+func (c *Checkup) reportVMSnapshotFailure(detail, customerMsg string, errStr *string) {
+	log.Print(detail)
+	appendSep(&c.results.VMSnapshot, detail)
+	appendSep(errStr, customerMsg)
 }
 
 // helper function to wait for VMSnapshot to be ready
@@ -1194,8 +1236,15 @@ func (c *Checkup) waitForVMSnapshotReady(ctx context.Context, snapshotName strin
 	})
 	elapsed := time.Since(waitStart).Round(time.Millisecond)
 	if err != nil {
+		var customerMsg string
+		if errors.Is(err, wait.ErrWaitTimeout) {
+			customerMsg = fmt.Sprintf("VM snapshot check failed: snapshot was not ready within %s", c.checkupConfig.VMITimeout)
+		} else {
+			customerMsg = fmt.Sprintf("VM snapshot check failed: %v", err)
+		}
 		c.reportVMSnapshotFailure(
 			fmt.Sprintf("failed waiting for VMSnapshot %q after %s: %v", snapshotName, elapsed, err),
+			customerMsg,
 			errStr,
 		)
 		return true
@@ -1212,7 +1261,10 @@ func (c *Checkup) validateVMSnapshot(snapshot *snapshotv1alpha1.VirtualMachineSn
 		if snapshot.Status != nil {
 			phase = string(snapshot.Status.Phase)
 		}
-		c.reportVMSnapshotFailure(fmt.Sprintf("VMSnapshot %q phase is %s, expected Succeeded", snapshotName, phase), errStr)
+		c.reportVMSnapshotFailure(
+			fmt.Sprintf("VMSnapshot %q phase is %s, expected Succeeded", snapshotName, phase),
+			"VM snapshot check failed: snapshot did not succeed",
+			errStr)
 		return true
 	}
 
@@ -1229,13 +1281,17 @@ func (c *Checkup) validateVMSnapshot(snapshot *snapshotv1alpha1.VirtualMachineSn
 		c.reportVMSnapshotFailure(
 			fmt.Sprintf("VMSnapshot %q indications %v do not equal expected %v or %v",
 				snapshotName, sets.List(actual), sets.List(withGuestAgent), sets.List(withoutGuestAgent)),
+			"VM snapshot check failed: unexpected snapshot indications",
 			errStr,
 		)
 		return true
 	}
 
 	if snapshot.Status.SnapshotVolumes == nil {
-		c.reportVMSnapshotFailure(fmt.Sprintf("VMSnapshot %q has no SnapshotVolumes", snapshotName), errStr)
+		c.reportVMSnapshotFailure(
+			fmt.Sprintf("VMSnapshot %q has no SnapshotVolumes", snapshotName),
+			"VM snapshot check failed: no volumes were included in the snapshot",
+			errStr)
 		return true
 	}
 
@@ -1252,6 +1308,7 @@ func (c *Checkup) validateVMSnapshot(snapshot *snapshotv1alpha1.VirtualMachineSn
 		c.reportVMSnapshotFailure(
 			fmt.Sprintf("VMSnapshot %q included volumes %v do not contain all expected %v",
 				snapshotName, sets.List(includedVolumes), sets.List(expectedVolumes)),
+			"VM snapshot check failed: some expected volumes were not included",
 			errStr,
 		)
 		return true
@@ -1260,6 +1317,7 @@ func (c *Checkup) validateVMSnapshot(snapshot *snapshotv1alpha1.VirtualMachineSn
 		c.reportVMSnapshotFailure(
 			fmt.Sprintf("VMSnapshot %q excluded volumes intersect expected: %v",
 				snapshotName, sets.List(expectedVolumes.Intersection(excludedVolumes))),
+			"VM snapshot check failed: expected volumes were excluded",
 			errStr,
 		)
 		return true
@@ -1269,7 +1327,7 @@ func (c *Checkup) validateVMSnapshot(snapshot *snapshotv1alpha1.VirtualMachineSn
 }
 
 func (c *Checkup) checkVMSnapshot(ctx context.Context, errStr *string) error {
-	log.Print("checkVMSnapshot")
+	log.Print("\n=== VM snapshot check ===")
 	apiGroup := "kubevirt.io"
 	// if no VM created: skip that test
 	if c.vmUnderTest == nil {
@@ -1355,7 +1413,7 @@ func (c *Checkup) stopVMUnderTest(ctx context.Context) error {
 }
 
 func (c *Checkup) checkVMRestore(ctx context.Context, errStr *string) error {
-	log.Print("checkVMRestore")
+	log.Print("\n=== VM restore check ===")
 	apiGroup := "kubevirt.io"
 
 	if c.vmUnderTest == nil {
@@ -1417,10 +1475,10 @@ func (c *Checkup) checkVMRestore(ctx context.Context, errStr *string) error {
 	return nil
 }
 
-func (c *Checkup) reportVMRestoreFailure(res string, errStr *string) {
-	log.Print(res)
-	appendSep(&c.results.VMRestore, res)
-	appendSep(errStr, res)
+func (c *Checkup) reportVMRestoreFailure(detail, customerMsg string, errStr *string) {
+	log.Print(detail)
+	appendSep(&c.results.VMRestore, detail)
+	appendSep(errStr, customerMsg)
 }
 
 func (c *Checkup) waitForVMRestoreComplete(ctx context.Context, restoreName string, errStr *string) bool {
@@ -1438,8 +1496,15 @@ func (c *Checkup) waitForVMRestoreComplete(ctx context.Context, restoreName stri
 	})
 	elapsed := time.Since(waitStart).Round(time.Millisecond)
 	if err != nil {
+		var customerMsg string
+		if errors.Is(err, wait.ErrWaitTimeout) {
+			customerMsg = fmt.Sprintf("VM restore check failed: restore did not complete within %s", c.checkupConfig.VMITimeout)
+		} else {
+			customerMsg = fmt.Sprintf("VM restore check failed: %v", err)
+		}
 		c.reportVMRestoreFailure(
 			fmt.Sprintf("failed waiting for VMRestore %q after %s: %v", restoreName, elapsed, err),
+			customerMsg,
 			errStr,
 		)
 		return true
@@ -1450,15 +1515,24 @@ func (c *Checkup) waitForVMRestoreComplete(ctx context.Context, restoreName stri
 
 func (c *Checkup) validateVMRestore(restore *snapshotv1alpha1.VirtualMachineRestore, restoreName string, errStr *string) bool {
 	if restore.Status == nil {
-		c.reportVMRestoreFailure(fmt.Sprintf("VMRestore %q has no status", restoreName), errStr)
+		c.reportVMRestoreFailure(
+			fmt.Sprintf("VMRestore %q has no status", restoreName),
+			"VM restore check failed: restore has no status",
+			errStr)
 		return true
 	}
 	if restore.Status.Complete == nil || !*restore.Status.Complete {
-		c.reportVMRestoreFailure(fmt.Sprintf("VMRestore %q is not complete", restoreName), errStr)
+		c.reportVMRestoreFailure(
+			fmt.Sprintf("VMRestore %q is not complete", restoreName),
+			"VM restore check failed: restore did not complete",
+			errStr)
 		return true
 	}
 	if len(restore.Status.Restores) == 0 {
-		c.reportVMRestoreFailure(fmt.Sprintf("VMRestore %q has no volume restores", restoreName), errStr)
+		c.reportVMRestoreFailure(
+			fmt.Sprintf("VMRestore %q has no volume restores", restoreName),
+			"VM restore check failed: no volumes were restored",
+			errStr)
 		return true
 	}
 	// Same idea as snapshot: every template volume should appear in Restores.
@@ -1474,6 +1548,7 @@ func (c *Checkup) validateVMRestore(restore *snapshotv1alpha1.VirtualMachineRest
 		c.reportVMRestoreFailure(
 			fmt.Sprintf("VMRestore %q restored volumes %v do not contain all expected %v",
 				restoreName, sets.List(restoredVolumes), sets.List(expectedVolumes)),
+			"VM restore check failed: some expected volumes were not restored",
 			errStr,
 		)
 		return true
