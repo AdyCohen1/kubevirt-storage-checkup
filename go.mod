@@ -1,6 +1,6 @@
 module github.com/kiagnose/kubevirt-storage-checkup
 
-go 1.19
+go 1.26
 
 require (
 	github.com/kiagnose/kiagnose v0.3.0
