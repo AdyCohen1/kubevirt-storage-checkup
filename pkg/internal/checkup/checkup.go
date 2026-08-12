@@ -870,7 +870,7 @@ func (c *Checkup) checkVMIBoot(ctx context.Context, errStr *string) error {
 	}
 	cloneType := pvc.Annotations["cdi.kubevirt.io/cloneType"]
 	c.results.VMVolumeClone = fmt.Sprintf("DV cloneType: %q", cloneType)
-	log.Printf(c.results.VMVolumeClone)
+	log.Print(c.results.VMVolumeClone)
 	if cloneType != "snapshot" && cloneType != "csi-clone" {
 		if reason := pvc.Annotations["cdi.kubevirt.io/cloneFallbackReason"]; reason != "" {
 			cloneFallbackReason := fmt.Sprintf("DV clone fallback reason: %s", reason)
