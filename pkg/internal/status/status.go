@@ -42,6 +42,8 @@ type Results struct {
 	VMLiveMigration                           string
 	VMHotplugVolume                           string
 	ConcurrentVMBoot                          string
+	VMSnapshot                                string
+	VMRestore                                 string
 }
 
 type Status struct {

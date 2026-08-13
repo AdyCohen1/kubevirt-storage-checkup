@@ -39,6 +39,7 @@ If you are running this checkup on vanilla Kubernetes (kubeadm, kOps, etc.) rath
 |spec.param.storageClass|Optional storage class to be used instead of the default one|False||
 |spec.param.vmiTimeout|Optional timeout for VMI operations|False|Default is 3m|
 |spec.param.numOfVMs|Optional number of concurrent VMs to boot|False|Default is 10|
+|spec.param.numOfDataVolumes|Optional number of additional data volumes to attach to the VM|False|Default is 0, max is 10|
 |spec.param.skipTeardown|Controls whether the teardown steps should be skipped after checkup completion|False|Available modes: `always`, `onfailure`, `never`. Default is `never`|
 
 
@@ -96,4 +97,6 @@ kubectl get configmap storage-checkup-config -n <target-namespace> -o yaml
 |status.result.vmVolumeClone|VM volume clone type used (efficient or host-assisted) and fallback reason||
 |status.result.vmLiveMigration|VM live-migration||
 |status.result.vmHotplugVolume|VM volume hotplug and unplug||
+|status.result.vmSnapshot|VM snapshot creation and validation||
+|status.result.vmRestore|VM restore from snapshot||
 |status.result.concurrentVMBoot|Concurrent VM boot from a golden image||

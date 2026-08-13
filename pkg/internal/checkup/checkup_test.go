@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
 	configv1 "github.com/openshift/api/config/v1"
@@ -42,11 +43,12 @@ import (
 	"github.com/kiagnose/kubevirt-storage-checkup/pkg/internal/checkup"
 	"github.com/kiagnose/kubevirt-storage-checkup/pkg/internal/config"
 	"github.com/kiagnose/kubevirt-storage-checkup/pkg/internal/reporter"
+
+	snapshotv1alpha1 "kubevirt.io/api/snapshot/v1alpha1"
 )
 
 const (
 	testNamespace = "target-ns"
-	testNode      = "test-node"
 )
 
 var (
@@ -87,6 +89,8 @@ var tests = map[string]struct {
 	clientConfig    clientConfig
 	expectedResults map[string]string
 	expectedErr     string
+	resultsContains bool
+	vmiTimeout      time.Duration
 }{
 	"noStorageClasses": {
 		clientConfig: clientConfig{noStorageClasses: true, expectNoVMI: true},
@@ -181,6 +185,29 @@ var tests = map[string]struct {
 		expectedResults: map[string]string{reporter.VMLiveMigrationKey: "failed waiting for VMI \"%s\" migration completed: migration failed"},
 		expectedErr:     "migration failed",
 	},
+	"snapshotFails": {
+		clientConfig: clientConfig{failSnapshot: true},
+		expectedResults: map[string]string{
+			reporter.VMSnapshotKey: `failed waiting for VMSnapshot "snapshot-%s" after 0s: snapshot failed`,
+			reporter.VMRestoreKey:  checkup.MessageSkipNoSnapshot,
+		},
+		expectedErr: `snapshot failed`,
+	},
+	"restoreFails": {
+		clientConfig: clientConfig{failRestore: true},
+		expectedResults: map[string]string{
+			reporter.VMRestoreKey: `VMRestore "restore-%s" has no volume restores`,
+		},
+		expectedErr: `has no volume restores`,
+	},
+	"stopFails": {
+		clientConfig: clientConfig{failStop: true},
+		expectedResults: map[string]string{
+			reporter.VMSnapshotKey: fmt.Sprintf("VMSnapshot name: snapshot-%%s"),
+		},
+		resultsContains: true,
+		expectedErr:     "failed to stop VM",
+	},
 	"skipMigrationOnSingleNode": {
 		clientConfig:    clientConfig{singleNode: true},
 		expectedResults: map[string]string{reporter.VMLiveMigrationKey: "Skip check - single node"},
@@ -193,6 +220,9 @@ func TestCheckupShouldReturnErrorWhen(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			testClient := newClientStub(tc.clientConfig)
 			testConfig := newTestConfig()
+			if tc.vmiTimeout > 0 {
+				testConfig.VMITimeout = tc.vmiTimeout
+			}
 
 			testCheckup := checkup.New(testClient, testNamespace, testConfig)
 
@@ -207,10 +237,16 @@ func TestCheckupShouldReturnErrorWhen(t *testing.T) {
 				checkOwnerRef(t, testClient)
 			}
 
-			expectedResults := fullExpectedResults(vmiUnderTestName, tc.expectedResults)
 			actualResults := reporter.FormatResults(testCheckup.Results())
-
-			assert.Equal(t, expectedResults, actualResults)
+			if tc.resultsContains {
+				for key, substr := range tc.expectedResults {
+					substr = strings.ReplaceAll(substr, "%s", vmiUnderTestName)
+					assert.Contains(t, actualResults[key], substr, "key %s", key)
+				}
+			} else {
+				expectedResults := fullExpectedResults(vmiUnderTestName, tc.expectedResults)
+				assert.Equal(t, expectedResults, actualResults)
+			}
 			if tc.expectedErr != "" {
 				assert.ErrorContains(t, err, tc.expectedErr)
 			} else {
@@ -237,9 +273,7 @@ func fullExpectedResults(vmiUnderTestName string, expectedResults map[string]str
 		expectedResultsNoVMI(fullResults)
 	}
 	for key, expectedResult := range expectedResults {
-		if strings.Contains(expectedResult, "%s") {
-			expectedResult = fmt.Sprintf(expectedResult, vmiUnderTestName)
-		}
+		expectedResult = strings.ReplaceAll(expectedResult, "%s", vmiUnderTestName)
 		fullResults[key] = expectedResult
 	}
 	return fullResults
@@ -248,6 +282,8 @@ func fullExpectedResults(vmiUnderTestName string, expectedResults map[string]str
 func expectedResultsNoVMI(expectedResults map[string]string) {
 	expectedResults[reporter.VMHotplugVolumeKey] = checkup.MessageSkipNoVMI
 	expectedResults[reporter.VMLiveMigrationKey] = checkup.MessageSkipNoVMI
+	expectedResults[reporter.VMSnapshotKey] = checkup.MessageSkipNoVMI
+	expectedResults[reporter.VMRestoreKey] = checkup.MessageSkipNoVMI
 	expectedResults[reporter.VMVolumeCloneKey] = ""
 }
 
@@ -273,6 +309,23 @@ func successfulRunResults(vmiUnderTestName string) map[string]string {
 		reporter.VMHotplugVolumeKey: fmt.Sprintf("VMI %q hotplug volume ready\nVMI %q hotplug volume removed",
 			vmiUnderTestName, vmiUnderTestName),
 		reporter.ConcurrentVMBootKey: "Boot completed on all VMs on time",
+		reporter.VMSnapshotKey: strings.Join([]string{
+			fmt.Sprintf("VMSnapshot name: %s", "snapshot-"+vmiUnderTestName),
+			fmt.Sprintf("VMSnapshot for VM %q succeeded", vmiUnderTestName),
+			"Creation time: 03:04:05 UTC",
+			"Creation duration: 0s",
+			"Ready duration: 0s",
+			"ReadyToUse=true",
+			"Indications: [Online GuestAgent]",
+			fmt.Sprintf("Included volumes: [%s-dv]", vmiUnderTestName),
+		}, "\n"),
+		reporter.VMRestoreKey: strings.Join([]string{
+			fmt.Sprintf("VMRestore name: %s", "restore-"+vmiUnderTestName),
+			fmt.Sprintf("VMRestore for VM %q succeeded", vmiUnderTestName),
+			"Restore time: 03:05:06 UTC",
+			"Complete duration: 0s",
+			"Complete=true",
+		}, "\n"),
 	}
 }
 
@@ -294,12 +347,17 @@ type clientConfig struct {
 	expectNoVMI                       bool
 	cloneFallback                     bool
 	failMigration                     bool
+	failSnapshot                      bool
+	failRestore                       bool
+	failStop                          bool
 	singleNode                        bool
 }
 
 type clientStub struct {
 	createdVMs        map[string]*kvcorev1.VirtualMachine
 	createdVMIs       map[string]*kvcorev1.VirtualMachineInstance
+	createdSnapshots  map[string]*snapshotv1alpha1.VirtualMachineSnapshot
+	createdRestores   map[string]*snapshotv1alpha1.VirtualMachineRestore
 	vmCreationFailure error
 	vmDeletionFailure error
 	vmiGetFailure     error
@@ -308,9 +366,11 @@ type clientStub struct {
 
 func newClientStub(clientConfig clientConfig) *clientStub {
 	return &clientStub{
-		createdVMs:   map[string]*kvcorev1.VirtualMachine{},
-		createdVMIs:  map[string]*kvcorev1.VirtualMachineInstance{},
-		clientConfig: clientConfig,
+		createdVMs:       map[string]*kvcorev1.VirtualMachine{},
+		createdVMIs:      map[string]*kvcorev1.VirtualMachineInstance{},
+		createdSnapshots: map[string]*snapshotv1alpha1.VirtualMachineSnapshot{},
+		createdRestores:  map[string]*snapshotv1alpha1.VirtualMachineRestore{},
+		clientConfig:     clientConfig,
 	}
 }
 
@@ -352,6 +412,23 @@ func (cs *clientStub) CreateVirtualMachine(ctx context.Context, namespace string
 	return vm, nil
 }
 
+func (cs *clientStub) StopVirtualMachine(ctx context.Context, namespace, name string, stopOptions *kvcorev1.StopOptions) error {
+	if cs.failStop {
+		return fmt.Errorf("failed to stop VM")
+	}
+	vmFullName := objectFullName(namespace, name)
+	vm, exist := cs.createdVMs[vmFullName]
+	if !exist {
+		return errors.NewNotFound(schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachines"}, name)
+	}
+	// Mimic Stop on Always: KubeVirt moves to Halted and removes the VMI.
+	runStrategy := kvcorev1.RunStrategyHalted
+	vm.Spec.RunStrategy = &runStrategy
+	vm.Spec.Running = nil
+	delete(cs.createdVMIs, vmFullName)
+	return nil
+}
+
 func (cs *clientStub) DeleteVirtualMachine(ctx context.Context, namespace, name string) error {
 	if cs.vmDeletionFailure != nil {
 		return cs.vmDeletionFailure
@@ -360,9 +437,6 @@ func (cs *clientStub) DeleteVirtualMachine(ctx context.Context, namespace, name 
 	vmFullName := objectFullName(namespace, name)
 	if _, exist := cs.createdVMs[vmFullName]; !exist {
 		return errors.NewNotFound(schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachines"}, name)
-	}
-	if _, exist := cs.createdVMIs[vmFullName]; !exist {
-		return errors.NewNotFound(schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachineinstances"}, name)
 	}
 
 	if !cs.skipDeletion {
@@ -770,6 +844,140 @@ func (cs *clientStub) GetClusterVersion(ctx context.Context, name string) (*conf
 	}
 
 	return ver, nil
+}
+
+func (cs *clientStub) CreateVirtualMachineSnapshot(ctx context.Context, namespace string,
+	snapshot *snapshotv1alpha1.VirtualMachineSnapshot) (*snapshotv1alpha1.VirtualMachineSnapshot, error) {
+	snapshot.Namespace = namespace
+	snapshotFullName := objectFullName(snapshot.Namespace, snapshot.Name)
+	cs.createdSnapshots[snapshotFullName] = snapshot
+	vmFullName := objectFullName(namespace, snapshot.Spec.Source.Name)
+	vm, exists := cs.createdVMs[vmFullName]
+	if !exists {
+		return nil, fmt.Errorf("virtual machine %s not found", vmFullName)
+	}
+	var includedVolumes []string
+	for _, volume := range vm.Spec.Template.Spec.Volumes {
+		includedVolumes = append(includedVolumes, volume.Name)
+	}
+
+	readyToUse := true
+	creationTime := metav1.Time{Time: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)}
+	snapshot.CreationTimestamp = creationTime
+
+	phase := snapshotv1alpha1.Succeeded
+	if cs.failSnapshot {
+		phase = snapshotv1alpha1.Failed
+		readyToUse = false
+	}
+
+	indications := []snapshotv1alpha1.Indication{
+		snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication,
+		snapshotv1alpha1.VMSnapshotGuestAgentIndication,
+	}
+
+	snapshotVolumes := &snapshotv1alpha1.SnapshotVolumesLists{
+		IncludedVolumes: includedVolumes,
+		ExcludedVolumes: []string{},
+	}
+
+	snapshot.Status = &snapshotv1alpha1.VirtualMachineSnapshotStatus{
+		Phase:           phase,
+		ReadyToUse:      &readyToUse,
+		CreationTime:    &creationTime,
+		Indications:     indications,
+		SnapshotVolumes: snapshotVolumes,
+	}
+	return snapshot, nil
+}
+
+func (cs *clientStub) GetVirtualMachineSnapshot(ctx context.Context, namespace,
+	name string) (*snapshotv1alpha1.VirtualMachineSnapshot, error) {
+	snapshotFullName := objectFullName(namespace, name)
+	snapshot, exists := cs.createdSnapshots[snapshotFullName]
+	if !exists {
+		return nil, errors.NewNotFound(schema.GroupResource{Group: "kubevirt.io", Resource: "virtualmachinesnapshots"}, name)
+	}
+	return snapshot, nil
+}
+
+func (cs *clientStub) DeleteVirtualMachineSnapshot(ctx context.Context, namespace, name string) error {
+	snapshotFullName := objectFullName(namespace, name)
+	delete(cs.createdSnapshots, snapshotFullName)
+	return nil
+}
+
+func (cs *clientStub) CreateVirtualMachineRestore(ctx context.Context, namespace string,
+	restore *snapshotv1alpha1.VirtualMachineRestore) (*snapshotv1alpha1.VirtualMachineRestore, error) {
+	restore.Namespace = namespace
+	// 1. snapshot
+	snapshotFullName := objectFullName(namespace, restore.Spec.VirtualMachineSnapshotName)
+	snapshot, exists := cs.createdSnapshots[snapshotFullName]
+	if !exists {
+		return nil, errors.NewNotFound(schema.GroupResource{Group: "snapshot.kubevirt.io", Resource: "virtualmachinesnapshots"},
+			restore.Spec.VirtualMachineSnapshotName)
+	}
+	// 2. VM from snapshot source
+	vmFullName := objectFullName(namespace, snapshot.Spec.Source.Name)
+	vm, exists := cs.createdVMs[vmFullName]
+	if !exists {
+		return nil, fmt.Errorf("virtual machine %s not found", vmFullName)
+	}
+	// 3. build status from VM disks
+	var restores []snapshotv1alpha1.VolumeRestore
+	for _, vol := range vm.Spec.Template.Spec.Volumes {
+		vsName := fmt.Sprintf("vs-%s", vol.Name)
+		restores = append(restores, snapshotv1alpha1.VolumeRestore{
+			VolumeName:                vol.Name,
+			PersistentVolumeClaimName: vol.Name,
+			VolumeSnapshotName:        vsName,
+		})
+	}
+	var deletedDVs []string
+	for _, dvt := range vm.Spec.DataVolumeTemplates {
+		deletedDVs = append(deletedDVs, dvt.Name)
+	}
+
+	complete := true
+	restoreTime := metav1.Time{Time: time.Date(2026, 1, 2, 3, 5, 6, 0, time.UTC)}
+	if cs.failRestore {
+		restores = nil
+	}
+
+	restore.Status = &snapshotv1alpha1.VirtualMachineRestoreStatus{
+		Complete:           &complete,
+		RestoreTime:        &restoreTime,
+		Restores:           restores,
+		DeletedDataVolumes: deletedDVs,
+		Conditions: []snapshotv1alpha1.Condition{
+			{
+				Type:   snapshotv1alpha1.ConditionReady,
+				Status: corev1.ConditionTrue,
+			},
+			{
+				Type:   snapshotv1alpha1.ConditionProgressing,
+				Status: corev1.ConditionFalse,
+			},
+		},
+	}
+	cs.createdRestores[objectFullName(namespace, restore.Name)] = restore
+	return restore, nil
+}
+
+func (cs *clientStub) GetVirtualMachineRestore(ctx context.Context, namespace,
+	name string) (*snapshotv1alpha1.VirtualMachineRestore, error) {
+	restoreFullName := objectFullName(namespace, name)
+	restore, exists := cs.createdRestores[restoreFullName]
+	if !exists {
+		return nil, errors.NewNotFound(schema.GroupResource{Group: "snapshot.kubevirt.io", Resource: "virtualmachinerestores"}, name)
+	}
+	return restore, nil
+}
+
+func (cs *clientStub) DeleteVirtualMachineRestore(ctx context.Context, namespace, name string) error {
+	restoreFullName := objectFullName(namespace, name)
+	delete(cs.createdRestores, restoreFullName)
+	return nil
 }
 
 func (cs *clientStub) ListCDIs(ctx context.Context) (*cdiv1.CDIList, error) {
