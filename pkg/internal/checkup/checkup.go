@@ -856,7 +856,7 @@ func (c *Checkup) checkVMIBoot(ctx context.Context, errStr *string) error {
 	}
 
 	vmName := uniqueVMName()
-	c.vmUnderTest = newVMUnderTest(vmName, c.goldenImagePvc, c.goldenImageSnap, c.checkupConfig, false)
+	c.vmUnderTest = newVMUnderTest(vmName, c.goldenImagePvc, c.goldenImageSnap, c.checkupConfig, c.checkupConfig.NumOfDataVolumes)
 	log.Printf("Creating VM %q", vmName)
 	if _, err := c.client.CreateVirtualMachine(ctx, c.namespace, c.vmUnderTest); err != nil {
 		return fmt.Errorf("failed to create VM: %w", err)
@@ -1070,7 +1070,8 @@ func (c *Checkup) checkConcurrentVMIBoot(ctx context.Context, errStr *string) er
 
 			vmName := uniqueVMName()
 			log.Printf("Creating VM %q", vmName)
-			vm := newVMUnderTest(vmName, c.goldenImagePvc, c.goldenImageSnap, c.checkupConfig, true)
+
+			vm := newVMUnderTest(vmName, c.goldenImagePvc, c.goldenImageSnap, c.checkupConfig, max(c.checkupConfig.NumOfDataVolumes, 1))
 			if _, err := c.client.CreateVirtualMachine(ctx, c.namespace, vm); err != nil {
 				log.Printf("failed to create VM %q: %s", vmName, err)
 				isBootOk = false
