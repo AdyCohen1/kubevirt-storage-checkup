@@ -38,7 +38,7 @@ const (
 )
 
 func newVMUnderTest(name string, pvc *corev1.PersistentVolumeClaim, snap *snapshotv1.VolumeSnapshot,
-	checkupConfig config.Config, addBlankDataVolume bool) *kvcorev1.VirtualMachine {
+	checkupConfig config.Config, numBlankDataVolumes int) *kvcorev1.VirtualMachine {
 	dvName := getVMDvName(name)
 	dvOpts := []vmi.DataVolumeOption{}
 
@@ -60,16 +60,23 @@ func newVMUnderTest(name string, pvc *corev1.PersistentVolumeClaim, snap *snapsh
 		vmi.WithOwnerReference(checkupConfig.PodName, checkupConfig.PodUID),
 	}
 
-	if addBlankDataVolume {
-		blankDvName := fmt.Sprintf("%s-blank", dvName)
-		dvOpts := []vmi.DataVolumeOption{vmi.WithDataVolumeBlankSource()}
-		if checkupConfig.StorageClass != "" {
-			dvOpts = append(dvOpts, vmi.WithDataVolumeStorageClass(checkupConfig.StorageClass))
-		}
-		optionsToApply = append(optionsToApply, vmi.WithDataVolume(blankDvName, dvOpts...))
-	}
+	optionsToApply = append(optionsToApply,
+		blankDataVolumeOptions(dvName, numBlankDataVolumes, checkupConfig.StorageClass)...)
 
 	return vmi.NewVM(name, optionsToApply...)
+}
+
+func blankDataVolumeOptions(dvName string, count int, storageClass string) []vmi.Option {
+	opts := make([]vmi.Option, 0, count)
+	for i := 1; i <= count; i++ {
+		blankDvName := fmt.Sprintf("%s-data-%d", dvName, i)
+		dvOpts := []vmi.DataVolumeOption{vmi.WithDataVolumeBlankSource()}
+		if storageClass != "" {
+			dvOpts = append(dvOpts, vmi.WithDataVolumeStorageClass(storageClass))
+		}
+		opts = append(opts, vmi.WithDataVolume(blankDvName, dvOpts...))
+	}
+	return opts
 }
 
 func getVMDvName(vmName string) string {
