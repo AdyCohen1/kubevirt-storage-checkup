@@ -809,19 +809,26 @@ func (c *Checkup) Teardown(ctx context.Context) error {
 	if c.vmUnderTest == nil {
 		return nil
 	}
-
-	if err := c.client.DeleteVirtualMachine(ctx, c.namespace, c.vmUnderTest.Name); ignoreNotFound(err) != nil {
-		return fmt.Errorf("teardown: %v", err)
+	var errs []error
+	collect := func(err error) {
+		if err != nil {
+			errs = append(errs, err)
+		}
 	}
+	err := c.client.DeleteVirtualMachineRestore(ctx, c.namespace, c.restoreName())
+	collect(teardownErr("delete restore", c.restoreName(), err))
+	err = c.client.DeleteVirtualMachineSnapshot(ctx, c.namespace, c.snapshotName())
+	collect(teardownErr("delete snapshot", c.snapshotName(), err))
+	err = c.client.DeleteVirtualMachine(ctx, c.namespace, c.vmUnderTest.Name)
+	collect(teardownErr("delete VM", c.vmUnderTest.Name, err))
+	err = c.client.DeleteDataVolume(ctx, c.namespace, hotplugVolumeName)
+	collect(teardownErr("delete DataVolume", hotplugVolumeName, err))
+	err = c.client.DeletePersistentVolumeClaim(ctx, c.namespace, hotplugVolumeName)
+	collect(teardownErr("delete PVC", hotplugVolumeName, err))
 
-	if err := c.client.DeleteDataVolume(ctx, c.namespace, hotplugVolumeName); ignoreNotFound(err) != nil {
-		return fmt.Errorf("teardown: %v", err)
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("teardown: %w", err)
 	}
-
-	if err := c.client.DeletePersistentVolumeClaim(ctx, c.namespace, hotplugVolumeName); ignoreNotFound(err) != nil {
-		return fmt.Errorf("teardown: %v", err)
-	}
-
 	return nil
 }
 
@@ -1170,4 +1177,11 @@ func ignoreNotFound(err error) error {
 		return nil
 	}
 	return err
+}
+
+func teardownErr(action, name string, err error) error {
+	if err = ignoreNotFound(err); err != nil {
+		return fmt.Errorf("%s %q: %w", action, name, err)
+	}
+	return nil
 }
