@@ -105,6 +105,8 @@ func TestReportShouldSuccessfullyReportResults(t *testing.T) {
 			"status.result.vmLiveMigration":                           checkupStatus.Results.VMLiveMigration,
 			"status.result.vmHotplugVolume":                           checkupStatus.Results.VMHotplugVolume,
 			"status.result.concurrentVMBoot":                          checkupStatus.Results.ConcurrentVMBoot,
+			"status.result.vmSnapshot":                                checkupStatus.Results.VMSnapshot,
+			"status.result.vmRestore":                                 checkupStatus.Results.VMRestore,
 		}
 		assert.Equal(t, expectedReportData, getCheckupData(t, fakeClient, testNamespace, testConfigMapName))
 	})

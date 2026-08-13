@@ -46,6 +46,8 @@ const (
 	VMLiveMigrationKey                           = "vmLiveMigration"
 	VMHotplugVolumeKey                           = "vmHotplugVolume"
 	ConcurrentVMBootKey                          = "concurrentVMBoot"
+	VMSnapshotKey                                = "vmSnapshot"
+	VMRestoreKey                                 = "vmRestore"
 )
 
 type Reporter struct {
@@ -95,6 +97,8 @@ func FormatResults(checkupResults status.Results) map[string]string {
 		VMLiveMigrationKey:                           checkupResults.VMLiveMigration,
 		VMHotplugVolumeKey:                           checkupResults.VMHotplugVolume,
 		ConcurrentVMBootKey:                          checkupResults.ConcurrentVMBoot,
+		VMSnapshotKey:                                checkupResults.VMSnapshot,
+		VMRestoreKey:                                 checkupResults.VMRestore,
 	}
 
 	return formattedResults

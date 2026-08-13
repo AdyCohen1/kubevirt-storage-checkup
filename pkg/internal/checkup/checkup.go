@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,21 +37,25 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
-
-	"github.com/kiagnose/kubevirt-storage-checkup/pkg/internal/config"
-	"github.com/kiagnose/kubevirt-storage-checkup/pkg/internal/status"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
 	configv1 "github.com/openshift/api/config/v1"
 
 	kvcorev1 "kubevirt.io/api/core/v1"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
+
+	snapshotv1alpha1 "kubevirt.io/api/snapshot/v1alpha1"
+
+	"github.com/kiagnose/kubevirt-storage-checkup/pkg/internal/config"
+	"github.com/kiagnose/kubevirt-storage-checkup/pkg/internal/status"
 )
 
 type kubeVirtStorageClient interface {
 	CreateVirtualMachine(ctx context.Context, namespace string, vm *kvcorev1.VirtualMachine) (*kvcorev1.VirtualMachine, error)
 	DeleteVirtualMachine(ctx context.Context, namespace, name string) error
+	StopVirtualMachine(ctx context.Context, namespace, name string, stopOptions *kvcorev1.StopOptions) error
 	GetVirtualMachineInstance(ctx context.Context, namespace, name string) (*kvcorev1.VirtualMachineInstance, error)
 	CreateVirtualMachineInstanceMigration(ctx context.Context, namespace string,
 		vmim *kvcorev1.VirtualMachineInstanceMigration) (*kvcorev1.VirtualMachineInstanceMigration, error)
@@ -75,6 +80,14 @@ type kubeVirtStorageClient interface {
 	GetCSIDriver(ctx context.Context, name string) (*storagev1.CSIDriver, error)
 	GetDataSource(ctx context.Context, namespace, name string) (*cdiv1.DataSource, error)
 	GetClusterVersion(ctx context.Context, name string) (*configv1.ClusterVersion, error)
+	CreateVirtualMachineSnapshot(ctx context.Context, namespace string,
+		snapshot *snapshotv1alpha1.VirtualMachineSnapshot) (*snapshotv1alpha1.VirtualMachineSnapshot, error)
+	GetVirtualMachineSnapshot(ctx context.Context, namespace, name string) (*snapshotv1alpha1.VirtualMachineSnapshot, error)
+	DeleteVirtualMachineSnapshot(ctx context.Context, namespace, name string) error
+	CreateVirtualMachineRestore(ctx context.Context, namespace string,
+		restore *snapshotv1alpha1.VirtualMachineRestore) (*snapshotv1alpha1.VirtualMachineRestore, error)
+	GetVirtualMachineRestore(ctx context.Context, namespace, name string) (*snapshotv1alpha1.VirtualMachineRestore, error)
+	DeleteVirtualMachineRestore(ctx context.Context, namespace, name string) error
 }
 
 const (
@@ -102,6 +115,7 @@ const (
 	MessageSkipNoDefaultStorageClass = "Skip check - no default storage class"
 	MessageSkipNoGoldenImage         = "Skip check - no golden image PVC or Snapshot"
 	MessageSkipNoVMI                 = "Skip check - no VMI"
+	MessageSkipNoSnapshot            = "Skip check - no VM snapshot"
 	MessageSkipSingleNode            = "Skip check - single node"
 
 	pollInterval = 5 * time.Second
@@ -147,6 +161,7 @@ func (c *Checkup) Setup(ctx context.Context) error {
 	return nil
 }
 
+//nolint:gocyclo
 func (c *Checkup) Run(ctx context.Context) error {
 	errStr := ""
 
@@ -197,6 +212,14 @@ func (c *Checkup) Run(ctx context.Context) error {
 		return err
 	}
 	if err := c.checkVMIHotplugVolume(ctx, &errStr); err != nil {
+		return err
+	}
+
+	snapshotOK, snapErr := c.checkVMSnapshot(ctx, &errStr)
+	if snapErr != nil {
+		return snapErr
+	}
+	if err := c.checkVMRestore(ctx, snapshotOK, &errStr); err != nil {
 		return err
 	}
 
@@ -810,21 +833,22 @@ func (c *Checkup) Teardown(ctx context.Context) error {
 		return nil
 	}
 	var errs []error
-	collect := func(err error) {
-		if err != nil {
-			errs = append(errs, err)
+	appendTeardownErr := func(action, name string, err error) {
+		if err = ignoreNotFound(err); err != nil {
+			errs = append(errs, fmt.Errorf("%s %q: %w", action, name, err))
 		}
 	}
-	err := c.client.DeleteVirtualMachineRestore(ctx, c.namespace, c.restoreName())
-	collect(teardownErr("delete restore", c.restoreName(), err))
-	err = c.client.DeleteVirtualMachineSnapshot(ctx, c.namespace, c.snapshotName())
-	collect(teardownErr("delete snapshot", c.snapshotName(), err))
-	err = c.client.DeleteVirtualMachine(ctx, c.namespace, c.vmUnderTest.Name)
-	collect(teardownErr("delete VM", c.vmUnderTest.Name, err))
-	err = c.client.DeleteDataVolume(ctx, c.namespace, hotplugVolumeName)
-	collect(teardownErr("delete DataVolume", hotplugVolumeName, err))
-	err = c.client.DeletePersistentVolumeClaim(ctx, c.namespace, hotplugVolumeName)
-	collect(teardownErr("delete PVC", hotplugVolumeName, err))
+
+	appendTeardownErr("delete restore", c.restoreName(),
+		c.client.DeleteVirtualMachineRestore(ctx, c.namespace, c.restoreName()))
+	appendTeardownErr("delete snapshot", c.snapshotName(),
+		c.client.DeleteVirtualMachineSnapshot(ctx, c.namespace, c.snapshotName()))
+	appendTeardownErr("delete VM", c.vmUnderTest.Name,
+		c.client.DeleteVirtualMachine(ctx, c.namespace, c.vmUnderTest.Name))
+	appendTeardownErr("delete DataVolume", hotplugVolumeName,
+		c.client.DeleteDataVolume(ctx, c.namespace, hotplugVolumeName))
+	appendTeardownErr("delete PVC", hotplugVolumeName,
+		c.client.DeletePersistentVolumeClaim(ctx, c.namespace, hotplugVolumeName))
 
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("teardown: %w", err)
@@ -1151,6 +1175,298 @@ func (c *Checkup) waitForVMIStatus(ctx context.Context, vmName, checkMsg string,
 	return nil
 }
 
+func (c *Checkup) reportVMSnapshotFailure(res string, errStr *string) {
+	log.Print(res)
+	appendSep(&c.results.VMSnapshot, res)
+	appendSep(errStr, res)
+}
+
+func (c *Checkup) waitForVMSnapshotReady(ctx context.Context, errStr *string) (bool, time.Duration) {
+	waitStart := time.Now()
+	log.Printf("Waiting for VMSnapshot %q ready (started at %s)", c.snapshotName(), waitStart.Format(time.RFC3339))
+	err := wait.PollImmediateWithContext(ctx, pollInterval, c.checkupConfig.VMITimeout, func(ctx context.Context) (bool, error) {
+		snapshot, err := c.client.GetVirtualMachineSnapshot(ctx, c.namespace, c.snapshotName())
+		if err != nil {
+			return false, ignoreNotFound(err)
+		}
+		if snapshot.Status != nil && snapshot.Status.ReadyToUse != nil && *snapshot.Status.ReadyToUse {
+			return true, nil
+		}
+		if snapshot.Status != nil && snapshot.Status.Phase == snapshotv1alpha1.Failed {
+			return false, errors.New("snapshot failed")
+		}
+		return false, nil
+	})
+	elapsed := time.Since(waitStart).Round(time.Millisecond)
+	if err != nil {
+		c.reportVMSnapshotFailure(
+			fmt.Sprintf("failed waiting for VMSnapshot %q after %s: %v", c.snapshotName(), elapsed, err),
+			errStr,
+		)
+		return false, 0
+	}
+	log.Printf("VMSnapshot %q ReadyToUse after %s", c.snapshotName(), elapsed)
+	return true, elapsed
+}
+
+func (c *Checkup) validateVMSnapshot(snapshot *snapshotv1alpha1.VirtualMachineSnapshot, errStr *string) bool {
+	if snapshot.Status == nil || snapshot.Status.Phase != snapshotv1alpha1.Succeeded {
+		phase := "has no status"
+		if snapshot.Status != nil {
+			phase = string(snapshot.Status.Phase)
+		}
+		c.reportVMSnapshotFailure(fmt.Sprintf("VMSnapshot %q phase is %s, expected Succeeded", c.snapshotName(), phase), errStr)
+		return false
+	}
+
+	actual := sets.New[snapshotv1alpha1.Indication](snapshot.Status.Indications...)
+	indicationsWithGA := sets.New(
+		snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication,
+		snapshotv1alpha1.VMSnapshotGuestAgentIndication,
+	)
+	indicationsWithoutGA := sets.New(
+		snapshotv1alpha1.VMSnapshotOnlineSnapshotIndication,
+		snapshotv1alpha1.VMSnapshotNoGuestAgentIndication,
+	)
+	if !actual.Equal(indicationsWithGA) && !actual.Equal(indicationsWithoutGA) {
+		c.reportVMSnapshotFailure(
+			fmt.Sprintf("VMSnapshot %q indications %v do not equal expected %v or %v",
+				c.snapshotName(), sets.List(actual), sets.List(indicationsWithGA), sets.List(indicationsWithoutGA)),
+			errStr,
+		)
+		return false
+	}
+
+	if snapshot.Status.SnapshotVolumes == nil {
+		c.reportVMSnapshotFailure(fmt.Sprintf("VMSnapshot %q has no SnapshotVolumes", c.snapshotName()), errStr)
+		return false
+	}
+
+	return true
+}
+
+func (c *Checkup) checkVMSnapshot(ctx context.Context, errStr *string) (bool, error) {
+	log.Print("checkVMSnapshot")
+
+	if c.vmUnderTest == nil {
+		log.Print(MessageSkipNoVMI)
+		c.results.VMSnapshot = MessageSkipNoVMI
+		return false, nil
+	}
+	vmSnapshot := &snapshotv1alpha1.VirtualMachineSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: c.snapshotName(),
+		},
+		Spec: snapshotv1alpha1.VirtualMachineSnapshotSpec{
+			Source: corev1.TypedLocalObjectReference{
+				APIGroup: new("kubevirt.io"),
+				Kind:     "VirtualMachine",
+				Name:     c.vmUnderTest.Name,
+			},
+		},
+	}
+
+	log.Printf("Creating VMSnapshot %q at %s", c.snapshotName(), time.Now().Format(time.RFC3339))
+	if _, err := c.client.CreateVirtualMachineSnapshot(ctx, c.namespace, vmSnapshot); err != nil {
+		return false, fmt.Errorf("failed to create VMSnapshot: %w", err)
+	}
+	log.Printf("VMSnapshot %q created", c.snapshotName())
+
+	ready, elapsed := c.waitForVMSnapshotReady(ctx, errStr)
+	if !ready {
+		return false, nil
+	}
+
+	snapshot, err := c.client.GetVirtualMachineSnapshot(ctx, c.namespace, c.snapshotName())
+	if err != nil {
+		return false, fmt.Errorf("failed to get VMSnapshot %q: %w", c.snapshotName(), err)
+	}
+	if !c.validateVMSnapshot(snapshot, errStr) {
+		return false, nil
+	}
+
+	log.Printf("VMSnapshot for VM %q succeeded, CreationTime=%s, ReadyToUse=%s",
+		c.vmUnderTest.Name, formatMetaTime(snapshot.Status.CreationTime), formatBoolPtr(snapshot.Status.ReadyToUse))
+	appendSep(&c.results.VMSnapshot, fmt.Sprintf("VMSnapshot name: %s", c.snapshotName()))
+	appendSep(&c.results.VMSnapshot, fmt.Sprintf("VMSnapshot for VM %q succeeded", c.vmUnderTest.Name))
+	appendSep(&c.results.VMSnapshot, fmt.Sprintf("Creation time: %s", formatMetaTime(snapshot.Status.CreationTime)))
+	appendSep(&c.results.VMSnapshot, fmt.Sprintf("Creation duration: %s",
+		snapshot.Status.CreationTime.Time.Sub(snapshot.CreationTimestamp.Time).Round(time.Millisecond)))
+	appendSep(&c.results.VMSnapshot, fmt.Sprintf("Ready duration: %s", elapsed))
+	appendSep(&c.results.VMSnapshot, fmt.Sprintf("ReadyToUse=%s", formatBoolPtr(snapshot.Status.ReadyToUse)))
+	appendSep(&c.results.VMSnapshot, fmt.Sprintf("Indications: %v", snapshot.Status.Indications))
+	appendSep(&c.results.VMSnapshot, fmt.Sprintf("Included volumes: %v", snapshot.Status.SnapshotVolumes.IncludedVolumes))
+	if len(snapshot.Status.SnapshotVolumes.ExcludedVolumes) > 0 {
+		appendSep(&c.results.VMSnapshot, fmt.Sprintf("Excluded volumes: %v", snapshot.Status.SnapshotVolumes.ExcludedVolumes))
+	}
+	return true, nil
+}
+
+// stopVMUnderTest stops the VM via the KubeVirt Stop subresource and waits until the VMI is gone.
+// Required before VirtualMachineRestore (v1alpha1 has no StopTarget policy).
+func (c *Checkup) stopVMUnderTest(ctx context.Context) error {
+	if c.vmUnderTest == nil {
+		return nil
+	}
+	vmName := c.vmUnderTest.Name
+	log.Printf("Stopping VM %q before restore", vmName)
+
+	if err := c.client.StopVirtualMachine(ctx, c.namespace, vmName, &kvcorev1.StopOptions{}); err != nil {
+		return fmt.Errorf("failed to stop VM %q: %w", vmName, err)
+	}
+
+	log.Printf("Waiting for VMI %q to disappear", vmName)
+	if err := wait.PollImmediateWithContext(ctx, pollInterval, c.checkupConfig.VMITimeout, func(ctx context.Context) (bool, error) {
+		_, err := c.client.GetVirtualMachineInstance(ctx, c.namespace, vmName)
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				return true, nil
+			}
+			return false, err
+		}
+		return false, nil
+	}); err != nil {
+		return fmt.Errorf("failed waiting for VMI %q to stop: %w", vmName, err)
+	}
+
+	log.Printf("VM %q stopped", vmName)
+	return nil
+}
+
+func (c *Checkup) checkVMRestore(ctx context.Context, snapshotOK bool, errStr *string) error {
+	log.Print("checkVMRestore")
+
+	if c.vmUnderTest == nil {
+		log.Print(MessageSkipNoVMI)
+		c.results.VMRestore = MessageSkipNoVMI
+		return nil
+	}
+	if !snapshotOK {
+		log.Print(MessageSkipNoSnapshot)
+		c.results.VMRestore = MessageSkipNoSnapshot
+		return nil
+	}
+
+	if err := c.stopVMUnderTest(ctx); err != nil {
+		return fmt.Errorf("failed to stop VM before restore: %w", err)
+	}
+
+	vmRestore := &snapshotv1alpha1.VirtualMachineRestore{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: c.restoreName(),
+		},
+		Spec: snapshotv1alpha1.VirtualMachineRestoreSpec{
+			Target: corev1.TypedLocalObjectReference{
+				APIGroup: new("kubevirt.io"),
+				Kind:     "VirtualMachine",
+				Name:     c.vmUnderTest.Name,
+			},
+			VirtualMachineSnapshotName: c.snapshotName(),
+		},
+	}
+
+	log.Printf("Creating VMRestore %q at %s", c.restoreName(), time.Now().Format(time.RFC3339))
+	if _, err := c.client.CreateVirtualMachineRestore(ctx, c.namespace, vmRestore); err != nil {
+		return fmt.Errorf("failed to create VMRestore: %w", err)
+	}
+	log.Printf("VMRestore %q created", c.restoreName())
+
+	complete, elapsed := c.waitForVMRestoreComplete(ctx, errStr)
+	if !complete {
+		return nil
+	}
+
+	restore, err := c.client.GetVirtualMachineRestore(ctx, c.namespace, c.restoreName())
+	if err != nil {
+		return fmt.Errorf("failed to get VMRestore %q: %w", c.restoreName(), err)
+	}
+	if !c.validateVMRestore(restore, errStr) {
+		return nil
+	}
+
+	log.Printf("VMRestore for VM %q succeeded (RestoreTime=%s, Complete=%s)",
+		c.vmUnderTest.Name, formatMetaTime(restore.Status.RestoreTime), formatBoolPtr(restore.Status.Complete))
+
+	appendSep(&c.results.VMRestore, fmt.Sprintf("VMRestore name: %s", c.restoreName()))
+	appendSep(&c.results.VMRestore, fmt.Sprintf("VMRestore for VM %q succeeded", c.vmUnderTest.Name))
+	appendSep(&c.results.VMRestore, fmt.Sprintf("Restore time: %s", formatMetaTime(restore.Status.RestoreTime)))
+	appendSep(&c.results.VMRestore, fmt.Sprintf("Complete duration: %s", elapsed))
+	appendSep(&c.results.VMRestore, fmt.Sprintf("Complete=%s", formatBoolPtr(restore.Status.Complete)))
+	return nil
+}
+
+func (c *Checkup) reportVMRestoreFailure(res string, errStr *string) {
+	log.Print(res)
+	appendSep(&c.results.VMRestore, res)
+	appendSep(errStr, res)
+}
+
+func (c *Checkup) waitForVMRestoreComplete(ctx context.Context, errStr *string) (bool, time.Duration) {
+	waitStart := time.Now()
+	log.Printf("Waiting for VMRestore %q complete (started at %s)", c.restoreName(), waitStart.Format(time.RFC3339))
+	err := wait.PollImmediateWithContext(ctx, pollInterval, c.checkupConfig.VMITimeout, func(ctx context.Context) (bool, error) {
+		restore, err := c.client.GetVirtualMachineRestore(ctx, c.namespace, c.restoreName())
+		if err != nil {
+			return false, ignoreNotFound(err)
+		}
+		if restore.Status != nil && restore.Status.Complete != nil && *restore.Status.Complete {
+			return true, nil
+		}
+		return false, nil
+	})
+	elapsed := time.Since(waitStart).Round(time.Millisecond)
+	if err != nil {
+		c.reportVMRestoreFailure(
+			fmt.Sprintf("failed waiting for VMRestore %q after %s: %v", c.restoreName(), elapsed, err),
+			errStr,
+		)
+		return false, 0
+	}
+	log.Printf("VMRestore %q complete after %s", c.restoreName(), elapsed)
+	return true, elapsed
+}
+
+func (c *Checkup) validateVMRestore(restore *snapshotv1alpha1.VirtualMachineRestore, errStr *string) bool {
+	if restore.Status == nil {
+		c.reportVMRestoreFailure(fmt.Sprintf("VMRestore %q has no status", c.restoreName()), errStr)
+		return false
+	}
+	if restore.Status.Complete == nil || !*restore.Status.Complete {
+		c.reportVMRestoreFailure(fmt.Sprintf("VMRestore %q is not complete", c.restoreName()), errStr)
+		return false
+	}
+	if len(restore.Status.Restores) == 0 {
+		c.reportVMRestoreFailure(fmt.Sprintf("VMRestore %q has no volume restores", c.restoreName()), errStr)
+		return false
+	}
+
+	expectedVolumes := sets.New[string]()
+	for _, vol := range c.vmUnderTest.Spec.Template.Spec.Volumes {
+		expectedVolumes.Insert(vol.Name)
+	}
+	restoredVolumes := sets.New[string]()
+	for _, vr := range restore.Status.Restores {
+		restoredVolumes.Insert(vr.VolumeName)
+	}
+	if !expectedVolumes.Equal(restoredVolumes.Intersection(expectedVolumes)) {
+		c.reportVMRestoreFailure(
+			fmt.Sprintf("VMRestore %q restored volumes %v do not contain all expected %v",
+				c.restoreName(), sets.List(restoredVolumes), sets.List(expectedVolumes)),
+			errStr,
+		)
+		return false
+	}
+	return true
+}
+
+func (c *Checkup) snapshotName() string {
+	return fmt.Sprintf("snapshot-%s", c.vmUnderTest.Name)
+}
+
+func (c *Checkup) restoreName() string {
+	return fmt.Sprintf("restore-%s", c.vmUnderTest.Name)
+}
+
 func appendSep(s *string, appended string) {
 	if s == nil {
 		return
@@ -1160,6 +1476,20 @@ func appendSep(s *string, appended string) {
 		return
 	}
 	*s = *s + "\n" + appended
+}
+
+func formatMetaTime(t *metav1.Time) string {
+	if t == nil {
+		return "<nil>"
+	}
+	return t.UTC().Format("15:04:05 UTC")
+}
+
+func formatBoolPtr(b *bool) string {
+	if b == nil {
+		return "<nil>"
+	}
+	return strconv.FormatBool(*b)
 }
 
 // FIXME: use slices.contains instead
@@ -1178,11 +1508,4 @@ func ignoreNotFound(err error) error {
 		return nil
 	}
 	return err
-}
-
-func teardownErr(action, name string, err error) error {
-	if err = ignoreNotFound(err); err != nil {
-		return fmt.Errorf("%s %q: %w", action, name, err)
-	}
-	return nil
 }
