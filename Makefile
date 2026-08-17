@@ -7,7 +7,7 @@ GO_IMAGE_NAME := docker.io/library/golang
 GO_IMAGE_TAG := 1.26.0-bookworm
 
 LINTER_IMAGE_NAME := docker.io/golangci/golangci-lint
-LINTER_IMAGE_TAG := v1.50.1
+LINTER_IMAGE_TAG := v2.12.2
 
 PROJECT_WORKING_DIR := /go/src/github.com/kiagnose/kubevirt-storage-checkup
 
