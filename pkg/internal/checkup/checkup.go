@@ -61,6 +61,7 @@ type kubeVirtStorageClient interface {
 	GetVirtualMachineInstance(ctx context.Context, namespace, name string) (*kvcorev1.VirtualMachineInstance, error)
 	CreateVirtualMachineInstanceMigration(ctx context.Context, namespace string,
 		vmim *kvcorev1.VirtualMachineInstanceMigration) (*kvcorev1.VirtualMachineInstanceMigration, error)
+	GetVirtualMachineInstanceMigration(namespace, name string) (*kvcorev1.VirtualMachineInstanceMigration, error)
 	CreateDataVolume(ctx context.Context, namespace string, dv *cdiv1.DataVolume) (*cdiv1.DataVolume, error)
 	DeleteDataVolume(ctx context.Context, namespace, name string) error
 	DeletePersistentVolumeClaim(ctx context.Context, namespace, name string) error
@@ -99,25 +100,38 @@ const (
 	AnnDefaultVirtStorageClass = "storageclass.kubevirt.io/is-default-virt-class"
 	AnnDefaultStorageClass     = "storageclass.kubernetes.io/is-default-class"
 
-	ErrNoDefaultStorageClass         = "no default storage class"
-	ErrPvcNotBound                   = "pvc failed to bound"
-	ErrMultipleDefaultStorageClasses = "there are multiple default storage classes"
-	ErrEmptyClaimPropertySets        = "there are StorageProfiles with empty ClaimPropertySets (unknown provisioners)"
+	ErrNoDefaultStorageClass = "No default storage class found. " +
+		"Set a default StorageClass on the cluster or provide one via spec.param.storageClass"
+	ErrPvcNotBound = "PVC binding check failed: a test PVC did not bind within the timeout. " +
+		"Check that the storage provisioner is healthy and the StorageClass is functional"
+	ErrMultipleDefaultStorageClasses = "Multiple default storage classes found. Ensure only one StorageClass is annotated as default"
+	ErrEmptyClaimPropertySets        = "Some StorageProfiles have empty ClaimPropertySets (unknown provisioners). " +
+		"Check that all provisioners are properly configured"
 	// FIXME: need to decide of we want to return errors in this cases
 	// errMissingVolumeSnapshotClass    = "there are StorageProfiles missing VolumeSnapshotClass"
 	// errVMsWithNonVirtRbdStorageClass = "there are VMs using the plain RBD storageclass when the virtualization storageclass exists"
-	ErrVMsWithUnsetEfsStorageClass   = "there are VMs using an EFS storageclass where the gid and uid are not set in the storageclass"
-	ErrGoldenImagesNotUpToDate       = "there are golden images whose DataImportCron is not up to date or DataSource is not ready"
-	ErrGoldenImageNoDataSource       = "dataSource has no PVC or Snapshot source"
-	ErrBootFailedOnSomeVMs           = "some of the VMs failed to complete boot on time"
+	ErrVMsWithUnsetEfsStorageClass = "VMs are using an EFS StorageClass where uid/gid are not set. " +
+		"Configure uid and gid in the StorageClass parameters"
+	ErrGoldenImagesNotUpToDate = "Golden images are not up to date: DataImportCron is not current or DataSource is not ready"
+	ErrGoldenImageNoDataSource = "Golden image DataSource has no PVC or Snapshot source configured"
+	ErrBootFailedOnSomeVMs     = "Concurrent VM boot check failed: one or more VMs did not boot successfully. " +
+		"Check the logs and the concurrentVMBoot result for details"
 	MessageBootCompletedOnAllVMs     = "Boot completed on all VMs on time"
-	MessageSkipNoDefaultStorageClass = "Skip check - no default storage class"
-	MessageSkipNoGoldenImage         = "Skip check - no golden image PVC or Snapshot"
-	MessageSkipNoVMI                 = "Skip check - no VMI"
-	MessageSkipNoSnapshot            = "Skip check - no VM snapshot"
-	MessageSkipSingleNode            = "Skip check - single node"
+	MessageSkipNoDefaultStorageClass = "Skipped - no default storage class"
+	MessageSkipNoGoldenImage         = "Skipped - no golden image PVC or Snapshot"
+	MessageSkipNoVMI                 = "Skipped - no VMI"
+	MessageSkipNoSnapshot            = "Skipped - no VM snapshot"
+	MessageSkipSingleNode            = "Skipped - single node"
 
 	pollInterval = 5 * time.Second
+)
+
+// Internal sentinel errors used for golden image control flow. The customer-facing
+// messages are the ErrGoldenImages* constants above; these lowercase errors satisfy
+// the Go convention (staticcheck ST1005) that error strings are not capitalized.
+var (
+	errGoldenImagesNotUpToDate = errors.New("golden images not up to date")
+	errGoldenImageNoDataSource = errors.New("golden image has no data source")
 )
 
 // UnsupportedProvisioners is a hash of provisioners which are known not to work with CDI
@@ -336,10 +350,10 @@ func (c *Checkup) checkDataImportCrons(ctx context.Context, namespace string, cs
 		dic := &dics.Items[i]
 		pvc, snap, err := c.getGoldenImage(ctx, dic)
 		if err != nil {
-			if err.Error() == ErrGoldenImageNoDataSource {
+			if errors.Is(err, errGoldenImageNoDataSource) {
 				appendSep(&cs.noDataSourceDicNames, dic.Namespace+"/"+dic.Name)
 				continue
-			} else if err.Error() == ErrGoldenImagesNotUpToDate {
+			} else if errors.Is(err, errGoldenImagesNotUpToDate) {
 				appendSep(&cs.notReadyDicNames, dic.Namespace+"/"+dic.Name)
 				continue
 			}
@@ -356,14 +370,14 @@ func (c *Checkup) checkDataImportCrons(ctx context.Context, namespace string, cs
 func (c *Checkup) getGoldenImage(ctx context.Context, dic *cdiv1.DataImportCron) (
 	*corev1.PersistentVolumeClaim, *snapshotv1.VolumeSnapshot, error) {
 	if !isDataImportCronUpToDate(dic.Status.Conditions) {
-		return nil, nil, errors.New(ErrGoldenImagesNotUpToDate)
+		return nil, nil, errGoldenImagesNotUpToDate
 	}
 	das, err := c.client.GetDataSource(ctx, dic.Namespace, dic.Spec.ManagedDataSource)
 	if err != nil {
 		return nil, nil, err
 	}
 	if !isDataSourceReady(das.Status.Conditions) {
-		return nil, nil, errors.New(ErrGoldenImagesNotUpToDate)
+		return nil, nil, errGoldenImagesNotUpToDate
 	}
 
 	if srcPvc := das.Spec.Source.PVC; srcPvc != nil {
@@ -381,7 +395,7 @@ func (c *Checkup) getGoldenImage(ctx context.Context, dic *cdiv1.DataImportCron)
 		return nil, snap, nil
 	}
 
-	return nil, nil, errors.New(ErrGoldenImageNoDataSource)
+	return nil, nil, errGoldenImageNoDataSource
 }
 
 func isDataImportCronUpToDate(conditions []cdiv1.DataImportCronCondition) bool {
@@ -970,6 +984,9 @@ func (c *Checkup) checkVMILiveMigration(ctx context.Context, errStr *string) err
 					return true, nil
 				}
 				if ms.Failed {
+					if msg := c.migrationFailureReason(vmim.Name); msg != "" {
+						return false, fmt.Errorf("migration failed: %s", msg)
+					}
 					return false, errors.New("migration failed")
 				}
 			}
@@ -979,6 +996,20 @@ func (c *Checkup) checkVMILiveMigration(ctx context.Context, errStr *string) err
 	}
 
 	return nil
+}
+
+// migrationFailureReason returns the message the cluster recorded on the migration object's conditions, or "" if none is available.
+func (c *Checkup) migrationFailureReason(name string) string {
+	vmim, err := c.client.GetVirtualMachineInstanceMigration(c.namespace, name)
+	if err != nil {
+		return ""
+	}
+	for _, cond := range vmim.Status.Conditions {
+		if cond.Message != "" {
+			return cond.Message
+		}
+	}
+	return ""
 }
 
 func (c *Checkup) checkVMHotplugVolume(ctx context.Context, errStr *string) error {
@@ -1122,7 +1153,7 @@ func (c *Checkup) checkConcurrentVMIBoot(ctx context.Context, errStr *string) er
 	}
 
 	var wg sync.WaitGroup
-	isBootOk := true
+	reasons := make(chan string, numOfVMs)
 
 	for i := 0; i < numOfVMs; i++ {
 		wg.Add(1)
@@ -1135,7 +1166,7 @@ func (c *Checkup) checkConcurrentVMIBoot(ctx context.Context, errStr *string) er
 			vm := newVMUnderTest(vmName, c.goldenImagePvc, c.goldenImageSnap, c.checkupConfig, max(c.checkupConfig.NumOfDataVolumes, 1))
 			if _, err := c.client.CreateVirtualMachine(ctx, c.namespace, vm); err != nil {
 				log.Printf("failed to create VM %q: %s", vmName, err)
-				isBootOk = false
+				reasons <- fmt.Sprintf("%s: %v", vmName, err)
 				return
 			}
 
@@ -1148,16 +1179,22 @@ func (c *Checkup) checkConcurrentVMIBoot(ctx context.Context, errStr *string) er
 			var result, errs string
 			if err := c.waitForVMIBoot(ctx, vmName, &result, &errs); err != nil || errs != "" {
 				log.Printf("failed waiting for VM boot %q", vmName)
-				isBootOk = false
+				reasons <- fmt.Sprintf("%s: %s", vmName, errs)
 			}
 		}()
 	}
 
 	wg.Wait()
-	if !isBootOk {
-		log.Print(ErrBootFailedOnSomeVMs)
-		c.results.ConcurrentVMBoot = ErrBootFailedOnSomeVMs
-		appendSep(errStr, ErrBootFailedOnSomeVMs)
+	close(reasons)
+	var failed []string
+	for r := range reasons {
+		failed = append(failed, r)
+	}
+	if len(failed) > 0 {
+		res := fmt.Sprintf("%s: %s", ErrBootFailedOnSomeVMs, strings.Join(failed, ", "))
+		log.Print(res)
+		c.results.ConcurrentVMBoot = res
+		appendSep(errStr, res)
 		return nil
 	}
 
@@ -1197,7 +1234,7 @@ func (c *Checkup) waitForVMIStatus(ctx context.Context, vmName, checkMsg string,
 		return checkVMIStatus(vmi)
 	}
 
-	log.Printf("Waiting for VMI %q %s", vmName, checkMsg)
+	log.Printf("Waiting for VMI %q to reach: %s", vmName, checkMsg)
 	if err := wait.PollImmediateWithContext(ctx, pollInterval, c.checkupConfig.VMITimeout, conditionFn); err != nil {
 		res := fmt.Sprintf("failed waiting for VMI %q %s: %v", vmName, checkMsg, err)
 		log.Print(res)
@@ -1230,6 +1267,9 @@ func (c *Checkup) waitForVMSnapshotReady(ctx context.Context, errStr *string) (b
 			return true, nil
 		}
 		if snapshot.Status != nil && snapshot.Status.Phase == snapshotv1alpha1.Failed {
+			if snapshot.Status.Error != nil && snapshot.Status.Error.Message != nil {
+				return false, fmt.Errorf("snapshot failed: %s", *snapshot.Status.Error.Message)
+			}
 			return false, errors.New("snapshot failed")
 		}
 		return false, nil
